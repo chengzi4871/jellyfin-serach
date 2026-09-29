@@ -142,7 +142,7 @@ $env:QDRANT_URL = "http://192.168.1.20:6333"
 
 ### 3. 编译和安装 Jellyfin 插件
 
-GitHub Actions 成功后，在仓库的 Actions → CI → Artifacts 下载 `visual-search-plugin.zip`。解压到 Jellyfin 的插件目录。Docker 安装通常类似：
+GitHub Actions 成功后，在仓库的 Actions → CI → Artifacts 下载 GitHub 生成的外层 Artifact 压缩包。先解开外层压缩包，再取出里面的 `visual-search-plugin.zip`；内层插件包只包含插件 DLL、PDB、`SixLabors.ImageSharp.dll` 和 `meta.json`。不要把外层 Artifact 中的其它框架程序集复制到 Jellyfin 插件目录，Jellyfin 自己已经提供 `MediaBrowser.*`、`Jellyfin.*`、`Microsoft.Extensions.*` 和 EntityFrameworkCore 等程序集。解开内层包后再安装：
 
 ```bash
 mkdir -p /你的Jellyfin配置目录/plugins/VisualSearch_0.1.0.0
