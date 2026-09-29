@@ -5,7 +5,7 @@
 ## 当前 P0 基线
 
 - `src/visual_search_core`：Trickplay tile 坐标、均匀采样、Frame→Video 聚合、缺失模态归一化融合、指纹和退避算法。
-- `worker`：FastAPI Worker API，提供 `/health`、`/embed/text`、`/embed/image`、`/embed/images`；当前默认使用确定性的 Mock Provider，真实 Qwen3-VL Provider 后续替换，不影响 API 和索引流程。
+- `worker`：FastAPI Worker API，提供 `/health`、`/embed/text`、`/embed/image`、`/embed/images` 和 Qdrant 写入/检索接口；默认使用确定性的 Mock Provider，也支持通过 `EMBEDDING_PROVIDER=qwen` 启用官方 Qwen3-VL-Embedding-2B。
 - `plugin`：Jellyfin 10.11 插件骨架、自定义 REST API、状态接口和 Web 命名空间。Jellyfin 特定代码集中在 Adapter 层，`JellyfinVersion` 在根目录 `Directory.Build.props` 统一控制。
 - `docker-compose.yml`：可选的快速试运行方式，不是部署前提。生产环境建议直接运行 Qdrant 服务和 Python Worker，避免为了本项目额外引入 Docker 管理负担。
 - `.github/workflows/ci.yml`：Python 核心/Worker 测试和 .NET 9 插件编译。

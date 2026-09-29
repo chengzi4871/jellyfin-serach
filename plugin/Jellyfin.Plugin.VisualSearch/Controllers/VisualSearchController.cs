@@ -72,14 +72,37 @@ public sealed class VisualSearchController : ControllerBase
         {
             var started = DateTime.UtcNow;
             var vector = await _client.EmbedTextAsync(request.Query, cancellationToken).ConfigureAwait(false);
-            var hits = await _client.SearchAsync(vector, "jellyfin_video_text", Math.Clamp(request.Limit, 1, 100), cancellationToken).ConfigureAwait(false);
-            var userId = GetUserId();
-            var results = hits.Select(hit =>
+            var textHitsTask = _client.SearchAsync(vector, "jellyfin_video_text", 100, cancellationToken);
+            var frameHitsTask = _client.SearchAsync(vector, "jellyfin_video_frames", 500, cancellationToken);
+            await Task.WhenAll(textHitsTask, frameHitsTask).ConfigureAwait(false);
+            var textHits = await textHitsTask.ConfigureAwait(false);
+            var frameHits = await frameHitsTask.ConfigureAwait(false);
+            var titleScores = textHits.GroupBy(x => x.ItemId).ToDictionary(x => x.Key, x => x.Max(y => y.Score));
+            var frameGroups = frameHits.GroupBy(x => x.ItemId).ToDictionary(x => x.Key, x => x.OrderByDescending(y => y.Score).ToList());
+            var candidates = titleScores.Keys.Concat(frameGroups.Keys).Distinct().Select(itemId =>
             {
-                if (!Guid.TryParse(hit.ItemId, out var id)) return null;
+                frameGroups.TryGetValue(itemId, out var frames);
+                titleScores.TryGetValue(itemId, out var titleScore);
+                double? visualScore = frames is null || frames.Count == 0 ? null : 0.7 * frames[0].Score + 0.3 * frames.Take(3).Average(x => x.Score);
+                var vw = Plugin.Instance?.Configuration.VisualWeight ?? 0.75;
+                var tw = Plugin.Instance?.Configuration.TitleWeight ?? 0.25;
+                var final = visualScore.HasValue && titleScores.ContainsKey(itemId)
+                    ? (visualScore.Value * vw + titleScore * tw) / (vw + tw)
+                    : visualScore ?? titleScore;
+                var best = frames is { Count: > 0 } ? frames[0] : null;
+                var frame = best is null ? null : new BestFrame(
+                    best.Payload.TryGetProperty("frameIndex", out var fi) ? fi.GetInt32() : 0,
+                    best.Payload.TryGetProperty("timestampMs", out var ts) ? ts.GetInt64() : 0,
+                    best.Score);
+                return (itemId, final, visualScore, title: titleScores.ContainsKey(itemId) ? titleScore : (double?)null, frame);
+            }).OrderByDescending(x => x.final).Take(Math.Clamp(request.Limit, 1, 100)).ToArray();
+            var userId = GetUserId();
+            var results = candidates.Select(hit =>
+            {
+                if (!Guid.TryParse(hit.itemId, out var id)) return null;
                 // Passing the authenticated user id makes Jellyfin perform its normal access filtering.
                 var item = _libraryManager.GetItemById<MediaBrowser.Controller.Entities.Video>(id, userId);
-                return item is null ? null : new SearchResult(hit.ItemId, item.Name, hit.Score, null, hit.Score, null);
+                return item is null ? null : new SearchResult(hit.itemId, item.Name, hit.final, hit.visualScore, hit.title, hit.frame);
             }).Where(x => x is not null).Cast<SearchResult>().ToArray();
             return Ok(new SearchResponse(request.Query, results, (long)(DateTime.UtcNow - started).TotalMilliseconds));
         }
