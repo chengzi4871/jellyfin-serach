@@ -73,7 +73,7 @@ public sealed class VisualSearchController : ControllerBase
             var started = DateTime.UtcNow;
             var vector = await _client.EmbedTextAsync(request.Query, cancellationToken).ConfigureAwait(false);
             var hits = await _client.SearchAsync(vector, "jellyfin_video_text", Math.Clamp(request.Limit, 1, 100), cancellationToken).ConfigureAwait(false);
-            var userId = User.GetUserId();
+            var userId = GetUserId();
             var results = hits.Select(hit =>
             {
                 if (!Guid.TryParse(hit.ItemId, out var id)) return null;
