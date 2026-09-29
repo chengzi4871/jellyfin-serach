@@ -1,13 +1,19 @@
 param(
   [Parameter(Mandatory=$true)][string]$BaseUrl,
   [Parameter(Mandatory=$true)][string]$EmbeddingModel,
-  [Parameter(Mandatory=$true)][string]$ApiKey,
+  [string]$ApiKey,
   [string]$QdrantUrl = "http://127.0.0.1:6333",
   [int]$Dimension = 1024,
   [ValidateSet("openai_multimodal", "plain")][string]$Protocol = "openai_multimodal"
 )
 $ErrorActionPreference = 'Stop'
 Set-Location $PSScriptRoot
+if (-not $ApiKey) {
+  $secure = Read-Host "Cloud API key" -AsSecureString
+  $ptr = [Runtime.InteropServices.Marshal]::SecureStringToBSTR($secure)
+  try { $ApiKey = [Runtime.InteropServices.Marshal]::PtrToStringBSTR($ptr) }
+  finally { [Runtime.InteropServices.Marshal]::ZeroFreeBSTR($ptr) }
+}
 $env:EMBEDDING_PROVIDER = "remote"
 $env:REMOTE_EMBEDDING_BASE_URL = $BaseUrl
 $env:REMOTE_EMBEDDING_MODEL = $EmbeddingModel
