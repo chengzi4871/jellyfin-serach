@@ -17,8 +17,7 @@ public sealed class PluginServiceRegistrator : IPluginServiceRegistrator
         serviceCollection.AddTransient<IStartupFilter, IndexHtmlScriptStartupFilter>();
         serviceCollection.AddHttpClient<VisualSearchClient>((provider, client) =>
         {
-            client.BaseAddress = new System.Uri(Plugin.Instance?.Configuration.WorkerUrl ?? "http://127.0.0.1:8099");
-            client.Timeout = System.TimeSpan.FromSeconds(3);
+            client.Timeout = System.TimeSpan.FromSeconds(Math.Clamp(Plugin.Instance?.Configuration.EmbeddingTimeoutSeconds ?? 60, 5, 300));
         });
     }
 }
