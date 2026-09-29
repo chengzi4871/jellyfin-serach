@@ -145,12 +145,12 @@ $env:QDRANT_URL = "http://192.168.1.20:6333"
 GitHub Actions 成功后，在仓库的 Actions → CI → Artifacts 下载 `visual-search-plugin.zip`。解压到 Jellyfin 的插件目录。Docker 安装通常类似：
 
 ```bash
-mkdir -p /你的Jellyfin配置目录/plugins/VisualSearch_0.1.0.0
-unzip visual-search-plugin.zip -d /你的Jellyfin配置目录/plugins/VisualSearch_0.1.0.0
+mkdir -p /你的Jellyfin配置目录/plugins/VisualSearch_0.1.0.2
+unzip visual-search-plugin.zip -d /你的Jellyfin配置目录/plugins/VisualSearch_0.1.0.2
 docker restart jellyfin
 ```
 
-如果你的 Docker Compose 使用了命名卷，先通过 `docker volume inspect` 找到实际配置卷，或把插件目录复制到容器内的 `/config/plugins/VisualSearch_0.1.0.0`。安装后在 Jellyfin 管理后台的插件页面确认 **Visual Search** 已加载。
+如果你的 Docker Compose 使用了命名卷，先通过 `docker volume inspect` 找到实际配置卷，或把插件目录复制到容器内的 `/config/plugins/VisualSearch_0.1.0.2`。安装后在 Jellyfin 管理后台的插件页面确认 **Visual Search** 已加载。
 
 ### 4. 配置插件
 
