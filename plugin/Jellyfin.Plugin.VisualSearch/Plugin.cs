@@ -22,10 +22,7 @@ public sealed class Plugin : BasePlugin<PluginConfiguration>, IHasWebPages
         new PluginPageInfo
         {
             Name = "VisualSearch",
-            DisplayName = "Visual Search",
-            EnableInMainMenu = true,
-            EmbeddedResourcePath = "Jellyfin.Plugin.VisualSearch.Web.configPage.html",
-            MenuIcon = "search"
+            EmbeddedResourcePath = "Jellyfin.Plugin.VisualSearch.Web.configPage.html"
         }
     };
 }
@@ -33,8 +30,13 @@ public sealed class Plugin : BasePlugin<PluginConfiguration>, IHasWebPages
 public sealed class PluginConfiguration : BasePluginConfiguration
 {
     public bool Enabled { get; set; } = true;
-    public string WorkerUrl { get; set; } = "http://127.0.0.1:8099";
     public string QdrantUrl { get; set; } = "http://127.0.0.1:6333";
+    public string EmbeddingBaseUrl { get; set; } = "";
+    public string EmbeddingModel { get; set; } = "";
+    public string EmbeddingApiKey { get; set; } = "";
+    public string EmbeddingProtocol { get; set; } = "openai_multimodal";
+    public int EmbeddingDimension { get; set; } = 1024;
+    public int EmbeddingTimeoutSeconds { get; set; } = 60;
     public int FramesPerVideo { get; set; } = 12;
     public double VisualWeight { get; set; } = 0.75;
     public double TitleWeight { get; set; } = 0.25;
