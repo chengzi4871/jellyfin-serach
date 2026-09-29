@@ -7,8 +7,12 @@ from typing import Any
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel, Field
 
-from provider import create_provider
-from qdrant import QdrantConfig, QdrantRepository, TEXT_COLLECTION, FRAME_COLLECTION
+try:
+    from .provider import create_provider
+    from .qdrant import QdrantConfig, QdrantRepository, TEXT_COLLECTION, FRAME_COLLECTION
+except ImportError:  # uvicorn app:app from the worker directory
+    from provider import create_provider
+    from qdrant import QdrantConfig, QdrantRepository, TEXT_COLLECTION, FRAME_COLLECTION
 
 
 class TextRequest(BaseModel):
