@@ -149,6 +149,33 @@ public sealed class VisualSearchController : ControllerBase
         return Ok(new { itemId = video.Id, textIndexed = indexed.Text, framesIndexed = indexed.Frames });
     }
 
+    [HttpPost("Test/Random")]
+    public async Task<ActionResult> TestRandom([FromBody] RandomTestRequest? request, CancellationToken cancellationToken)
+    {
+        var count = Math.Clamp(request?.Count ?? 3, 1, 10);
+        var frames = Math.Clamp(request?.FramesPerVideo ?? 2, 1, 5);
+        var videos = _libraryManager.GetItemList(new MediaBrowser.Controller.Entities.InternalItemsQuery
+        {
+            MediaTypes = new[] { Jellyfin.Data.Enums.MediaType.Video },
+            IsVirtualItem = false,
+            IsFolder = false,
+            Recursive = true
+        }).OfType<MediaBrowser.Controller.Entities.Video>().OrderBy(_ => Guid.NewGuid()).Take(count).ToArray();
+        var results = new System.Collections.Generic.List<EmbeddingProbeResult>();
+        foreach (var video in videos)
+        {
+            try
+            {
+                results.Add(await _indexer.ProbeAsync(video, frames, cancellationToken).ConfigureAwait(false));
+            }
+            catch (Exception ex)
+            {
+                results.Add(new EmbeddingProbeResult(video.Id.ToString(), video.Name, false, 0, ex.Message));
+            }
+        }
+        return Ok(new { status = "completed", requestedVideos = count, testedVideos = results.Count, framesPerVideo = frames, results });
+    }
+
     private Guid GetUserId()
     {
         var claim = User.FindFirst("Jellyfin-UserId")?.Value ?? User.FindFirst(ClaimTypes.NameIdentifier)?.Value;
@@ -158,6 +185,7 @@ public sealed class VisualSearchController : ControllerBase
 
 public sealed record SearchRequest(string Query, string[]? LibraryIds = null, int Limit = 30);
 public sealed record IndexItemRequest(string ItemId, string? LibraryId = null);
+public sealed record RandomTestRequest(int Count = 3, int FramesPerVideo = 2);
 public sealed record SearchResponse(string Query, SearchResult[] Results, long ElapsedMs);
 public sealed record SearchResult(string ItemId, string Title, double Score, double? VisualScore, double? TitleScore, BestFrame? BestFrame);
 public sealed record BestFrame(int FrameIndex, long TimestampMs, double Score);
