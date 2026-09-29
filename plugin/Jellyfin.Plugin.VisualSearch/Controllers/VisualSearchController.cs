@@ -1,4 +1,3 @@
-using System.Collections.Generic;
 using System;
 using System.Threading;
 using System.Threading.Tasks;
@@ -37,12 +36,12 @@ public sealed class VisualSearchController : ControllerBase
     {
         try
         {
-            var worker = await _client.GetHealthAsync(cancellationToken).ConfigureAwait(false);
-            return Ok(new { status = "ready", worker, indexedVideos = _state.IndexedVideos });
+            var cloud = await _client.GetHealthAsync(cancellationToken).ConfigureAwait(false);
+            return Ok(new { status = "ready", cloud, indexedVideos = _state.IndexedVideos });
         }
         catch (Exception ex) when (ex is HttpRequestException or TaskCanceledException)
         {
-            return StatusCode(503, new { status = "offline", message = "semantic search worker is offline" });
+            return StatusCode(503, new { status = "offline", message = "cloud embedding API or Qdrant is offline" });
         }
     }
 
@@ -155,14 +154,14 @@ public sealed class VisualSearchController : ControllerBase
     {
         var count = Math.Clamp(request?.Count ?? 3, 1, 10);
         var frames = Math.Clamp(request?.FramesPerVideo ?? 2, 1, 5);
-        WorkerHealth worker;
+        WorkerHealth cloud;
         try
         {
-            worker = await _client.GetHealthAsync(cancellationToken).ConfigureAwait(false);
+            cloud = await _client.GetHealthAsync(cancellationToken).ConfigureAwait(false);
         }
         catch (Exception ex) when (ex is HttpRequestException or TaskCanceledException)
         {
-            return StatusCode(503, new { status = "offline", message = "semantic search computation node is offline" });
+            return StatusCode(503, new { status = "offline", message = "cloud embedding API or Qdrant is offline" });
         }
         var videos = _libraryManager.GetItemList(new MediaBrowser.Controller.Entities.InternalItemsQuery
         {
@@ -183,7 +182,7 @@ public sealed class VisualSearchController : ControllerBase
                 results.Add(new EmbeddingProbeResult(video.Id.ToString(), video.Name, false, 0, ex.Message));
             }
         }
-        return Ok(new { status = "completed", worker, requestedVideos = count, testedVideos = results.Count, framesPerVideo = frames, results });
+        return Ok(new { status = "completed", cloud, requestedVideos = count, testedVideos = results.Count, framesPerVideo = frames, results });
     }
 
     /// <summary>Returns the exact title text and individual frame images used for embedding, plus query-to-frame cosine scores.</summary>
