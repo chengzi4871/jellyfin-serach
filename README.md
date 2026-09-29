@@ -118,11 +118,11 @@ docker restart jellyfin
 
 ### 4. 配置插件
 
-在插件设置中填写：
+在插件设置中填写 Worker 地址；Qdrant 地址由 Windows Worker 的启动参数配置：
 
 ```text
 Worker URL:  http://Windows笔记本局域网地址:8099
-Qdrant URL:  http://Ubuntu局域网地址:6333
+Qdrant URL:  http://Ubuntu局域网地址:6333  # 在 run_windows.ps1 中配置
 Frames per video: 12
 Visual weight: 0.75
 Title weight: 0.25
