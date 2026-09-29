@@ -154,6 +154,15 @@ public sealed class VisualSearchController : ControllerBase
     {
         var count = Math.Clamp(request?.Count ?? 3, 1, 10);
         var frames = Math.Clamp(request?.FramesPerVideo ?? 2, 1, 5);
+        WorkerHealth worker;
+        try
+        {
+            worker = await _client.GetHealthAsync(cancellationToken).ConfigureAwait(false);
+        }
+        catch (Exception ex) when (ex is HttpRequestException or TaskCanceledException)
+        {
+            return StatusCode(503, new { status = "offline", message = "semantic search computation node is offline" });
+        }
         var videos = _libraryManager.GetItemList(new MediaBrowser.Controller.Entities.InternalItemsQuery
         {
             MediaTypes = new[] { Jellyfin.Data.Enums.MediaType.Video },
@@ -173,7 +182,7 @@ public sealed class VisualSearchController : ControllerBase
                 results.Add(new EmbeddingProbeResult(video.Id.ToString(), video.Name, false, 0, ex.Message));
             }
         }
-        return Ok(new { status = "completed", requestedVideos = count, testedVideos = results.Count, framesPerVideo = frames, results });
+        return Ok(new { status = "completed", worker, requestedVideos = count, testedVideos = results.Count, framesPerVideo = frames, results });
     }
 
     private Guid GetUserId()
