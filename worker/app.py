@@ -33,7 +33,12 @@ app = FastAPI(title="Jellyfin Visual Search Embedding Worker", version="0.1.0")
 
 @app.get("/health")
 def health() -> dict[str, Any]:
-    return {"status": "ready", "qdrantConfigured": bool(os.getenv("QDRANT_URL")), **provider.info.__dict__}
+    return {
+        "status": "ready",
+        "provider": os.getenv("EMBEDDING_PROVIDER", "mock"),
+        "qdrantConfigured": bool(os.getenv("QDRANT_URL")),
+        **provider.info.__dict__,
+    }
 
 
 @app.post("/qdrant/ensure")
