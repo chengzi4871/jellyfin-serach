@@ -27,9 +27,20 @@ jobs:
       - run: dotnet build plugin/Jellyfin.Plugin.VisualSearch/Jellyfin.Plugin.VisualSearch.csproj --configuration Release
       - run: dotnet publish plugin/Jellyfin.Plugin.VisualSearch/Jellyfin.Plugin.VisualSearch.csproj --configuration Release --output publish
       - name: Verify plugin dependencies
-        run: test -s publish/SixLabors.ImageSharp.dll
-      - run: cp plugin/Jellyfin.Plugin.VisualSearch/meta.json publish/meta.json
-      - run: cd publish && zip -r ../visual-search-plugin.zip .
+        run: |
+          test -s publish/Jellyfin.Plugin.VisualSearch.dll
+          test -s publish/Jellyfin.Plugin.VisualSearch.pdb
+          test -s publish/SixLabors.ImageSharp.dll
+      - name: Build minimal plugin package
+        run: |
+          rm -rf plugin-package
+          mkdir plugin-package
+          cp publish/Jellyfin.Plugin.VisualSearch.dll plugin-package/
+          cp publish/Jellyfin.Plugin.VisualSearch.pdb plugin-package/
+          cp publish/SixLabors.ImageSharp.dll plugin-package/
+          cp plugin/Jellyfin.Plugin.VisualSearch/meta.json plugin-package/
+          test "$(find plugin-package -maxdepth 1 -type f | wc -l)" -eq 4
+          cd plugin-package && zip -q -r ../visual-search-plugin.zip .
       - uses: actions/upload-artifact@v4
         with:
           name: visual-search-plugin
