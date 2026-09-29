@@ -8,7 +8,7 @@
 - `worker`：FastAPI Worker API，提供 `/health`、`/embed/text`、`/embed/image`、`/embed/images` 和 Qdrant 写入/检索接口；默认使用确定性的 Mock Provider，也支持通过 `EMBEDDING_PROVIDER=qwen` 启用官方 Qwen3-VL-Embedding-2B。
 - `plugin`：Jellyfin 10.11 插件骨架、自定义 REST API、状态接口和 Web 命名空间。Jellyfin 特定代码集中在 Adapter 层，`JellyfinVersion` 在根目录 `Directory.Build.props` 统一控制。
 - `docker-compose.yml`：可选的快速试运行方式，不是部署前提。生产环境建议直接运行 Qdrant 服务和 Python Worker，避免为了本项目额外引入 Docker 管理负担。
-- `.github/workflows/ci.yml`：Python 核心/Worker 测试和 .NET 9 插件编译。
+- `.github/workflows/ci.yml`：Python 核心/Worker 测试和 .NET 9 插件编译，同时只打包插件自身 DLL、PDB 与 `meta.json`，避免把 Jellyfin 框架程序集复制进插件目录。
 
 ## 本地验证
 
@@ -27,14 +27,14 @@ pip install -r worker/requirements.txt
 uvicorn worker.app:app --host 0.0.0.0 --port 8099
 ```
 
-插件只需要配置：
+插件实际连接 Worker；Worker 再连接 Qdrant：
 
 ```text
-Qdrant URL:  http://长期在线设备:6333
-Worker URL:  http://笔记本局域网地址:8099
+Jellyfin Plugin -> Worker URL: http://笔记本局域网地址:8099
+Windows Worker  -> Qdrant URL: http://长期在线设备:6333
 ```
 
-Worker 关闭、休眠或断网时，Qdrant 不会停止，已建立的索引也不会消失；索引任务保留 Pending/Partial 状态，待 Worker 恢复后继续处理。
+插件设置页中的 Qdrant URL 当前仅作为记录值，实际连接地址以 Worker 的 `QDRANT_URL` / `-QdrantUrl` 参数为准。Worker 关闭、休眠或断网时，Qdrant 不会停止，已建立的索引也不会消失；索引任务保留 Pending/Partial 状态，待 Worker 恢复后继续处理。
 
 ### Docker（可选）
 
@@ -48,11 +48,11 @@ docker compose up -d qdrant
 docker compose --profile worker up --build
 ```
 
-当前仓库只承诺完成可测试的架构基线，尚未声称已在真实 Jellyfin、真实 Trickplay、RTX 2070 或 Qwen 模型上完成集成验证。首次部署前应将 `Directory.Build.props` 的 `JellyfinVersion` 改为实际服务器的小版本，并依据该版本源码复核 Trickplay API、权限调用和 Web 注入行为。
+当前仓库仍处于真实环境联调阶段。Jellyfin 版本升级时应复核 `Directory.Build.props` 中的 `JellyfinVersion`、Trickplay API、权限调用和 Web 注入行为。
 
 ## 实际部署测试教程
 
-下面的部署分为三台逻辑组件：Jellyfin 插件运行在你的 Jellyfin Docker 容器中；Qdrant 运行在长期在线的 Ubuntu 设备上；Embedding Worker 运行在 Windows RTX 2070 笔记本上。插件只保存地址和任务状态，不保存 Worker 的模型或图片。
+下面的部署分为三台逻辑组件：Jellyfin 插件运行在 Jellyfin 服务端；Qdrant 运行在长期在线的 Ubuntu 设备上；Embedding Worker 运行在 Windows RTX 2070 笔记本上。插件只保存地址和任务状态，不保存 Worker 的模型或图片。
 
 ### 1. 在 Ubuntu 上启动 Qdrant
 
@@ -67,7 +67,7 @@ docker compose -f qdrant-docker-compose.yml up -d
 curl http://127.0.0.1:6333/healthz
 ```
 
-如果 Qdrant 与 Jellyfin 在同一台 Ubuntu 主机上，插件中的地址填写 `http://127.0.0.1:6333`；如果不在同一台机器，填写 Ubuntu 局域网地址，例如 `http://192.168.1.20:6333`。Qdrant 只需要长期在线，不依赖 Windows Worker。
+如果 Qdrant 与 Jellyfin 在同一台 Ubuntu 主机上，Windows Worker 仍应填写 Ubuntu 主机对 Windows 可达的局域网地址，而不是 Worker 自己的 `127.0.0.1`。
 
 ### 2. 在 Windows 笔记本上安装 Qwen Worker
 
@@ -106,29 +106,53 @@ $env:QDRANT_URL = "http://192.168.1.20:6333"
 
 ### 3. 编译和安装 Jellyfin 插件
 
-GitHub Actions 成功后，在仓库的 Actions → CI → Artifacts 下载 `visual-search-plugin.zip`。解压到 Jellyfin 的插件目录。Docker 安装通常类似：
+GitHub Actions 成功后，在仓库的 Actions → CI → Artifacts 下载 `visual-search-plugin`。浏览器下载得到的 ZIP **就是最终 Artifact**，不再包含第二层插件 ZIP；解压一次后应看到：
 
-```bash
-mkdir -p /你的Jellyfin配置目录/plugins/VisualSearch_0.1.0.0
-unzip visual-search-plugin.zip -d /你的Jellyfin配置目录/plugins/VisualSearch_0.1.0.0
-docker restart jellyfin
+```text
+VisualSearch_0.1.0.1/
+├── Jellyfin.Plugin.VisualSearch.dll
+├── Jellyfin.Plugin.VisualSearch.pdb
+└── meta.json
 ```
 
-如果你的 Docker Compose 使用了命名卷，先通过 `docker volume inspect` 找到实际配置卷，或把插件目录复制到容器内的 `/config/plugins/VisualSearch_0.1.0.0`。安装后在 Jellyfin 管理后台的插件页面确认 **Visual Search** 已加载。
+Jellyfin 的插件目录位于 **Jellyfin 数据目录下的 `plugins`**，不能把 Docker 宿主机挂载根目录机械地当成插件目录。可先在容器中定位实际目录：
+
+```bash
+docker exec jellyfin sh -lc 'find /config -maxdepth 4 -type d -name plugins -print'
+```
+
+当前已验证的这套部署，宿主机实际目录是 `~/docker/jellyfin/config/data/plugins/`。升级本插件时建议：
+
+```bash
+docker stop jellyfin
+rm -rf ~/docker/jellyfin/config/data/plugins/VisualSearch_0.1.0.0
+unzip visual-search-plugin.zip -d ~/docker/jellyfin/config/data/plugins/
+docker start jellyfin
+```
+
+重启后日志应出现类似：
+
+```text
+Loaded plugin: "Visual Search" "0.1.0.1"
+```
+
+**不要**把 `MediaBrowser.*`、`Jellyfin.Data`、`Microsoft.Extensions.*`、`EntityFrameworkCore.*` 等 Jellyfin/ASP.NET 框架 DLL 一起放进插件目录。它们会进入插件自己的 AssemblyLoadContext，可能导致插件实现的 `IPlugin` 与 Jellyfin 主程序中的 `IPlugin` 类型身份不一致，表现为“Loaded assembly”但插件实例没有创建。官方 Jellyfin 插件模板也要求对 Jellyfin 包设置 `ExcludeAssets=runtime`。
 
 ### 4. 配置插件
 
-在插件设置中填写 Worker 地址；Qdrant 地址由 Windows Worker 的启动参数配置：
+打开 Dashboard → Plugins → Visual Search。0.1.0.1 起，配置页按 Jellyfin 标准 `pluginConfigurationPage` 结构加载；如果仍看到空白页，先确认日志显示加载的是 `0.1.0.1`，并强制刷新浏览器缓存。
+
+填写：
 
 ```text
-Worker URL:  http://Windows笔记本局域网地址:8099
-Qdrant URL:  http://Ubuntu局域网地址:6333  # 在 run_windows.ps1 中配置
+Worker URL:       http://Windows笔记本局域网地址:8099
+Qdrant URL:       http://Ubuntu局域网地址:6333  # 当前仅记录；实际在 Worker 启动参数中配置
 Frames per video: 12
-Visual weight: 0.75
-Title weight: 0.25
+Visual weight:    0.75
+Title weight:     0.25
 ```
 
-先点击测试连接，再只选择 20～50 个视频验证完整链路。管理员索引接口为 `POST /VisualSearch/Index/Item`，请求体示例：
+先点击“测试 Worker”，再初始化 Qdrant，然后只选择少量视频验证完整链路。管理员索引接口为 `POST /VisualSearch/Index/Item`，请求体示例：
 
 ```json
 {"itemId":"Jellyfin视频ID","libraryId":"媒体库ID"}
@@ -138,13 +162,13 @@ Title weight: 0.25
 
 ### 5. JS 注入兼容性
 
-插件使用独立的 `window.JellyfinVisualSearch` 命名空间，并通过 `/VisualSearch/*` REST 路由工作，不覆盖 Jellyfin 原有搜索 API。你现有的 JS 注入可以继续保留；后续只需要在现有搜索界面增加一个按钮并调用：
+插件使用独立的 `window.JellyfinVisualSearch` 命名空间，并通过 `/VisualSearch/*` REST 路由工作，不覆盖 Jellyfin 原有搜索 API。现有 JS 注入可以继续保留；后续只需要在现有搜索界面增加一个按钮并调用：
 
 ```javascript
 window.JellyfinVisualSearch.search('卧室，两个人', [], 30)
 ```
 
-如果你的注入脚本修改了搜索页 DOM，插件不会强行替换它；语义搜索入口和结果页会单独实现。每次注入脚本初始化都应保持幂等，避免 Jellyfin SPA 路由切换时重复添加按钮。
+如果注入脚本修改了搜索页 DOM，插件不会强行替换它；语义搜索入口和结果页会单独实现。每次注入脚本初始化都应保持幂等，避免 Jellyfin SPA 路由切换时重复添加按钮。
 
 ### 6. 故障定位
 

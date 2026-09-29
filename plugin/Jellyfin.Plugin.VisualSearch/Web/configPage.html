@@ -1,26 +1,164 @@
-<!doctype html>
-<html><head><meta charset="utf-8"><title>Visual Search</title></head>
-<body style="font-family:sans-serif;padding:1em">
-<h2>Visual Search</h2>
-<p>配置 Worker、Qdrant 和索引参数。保存后刷新 Web 客户端。</p>
-<label>Worker URL <input id="workerUrl" style="width:28em"></label><br><br>
-<label>Qdrant URL <input id="qdrantUrl" style="width:28em"></label><small>（记录用；实际连接地址以 Worker 启动参数为准）</small><br><br>
-<label>Frames per video <input id="frames" type="number" min="1" max="100"></label><br><br>
-<label>Visual weight <input id="visual" type="number" min="0" max="1" step="0.05"></label><br><br>
-<label>Title weight <input id="title" type="number" min="0" max="1" step="0.05"></label><br><br>
-<button id="save">保存</button> <button id="ensure">初始化 Qdrant</button> <button id="health">测试 Worker</button><br><br>
-<button id="incremental">开始增量索引</button> <button id="rebuild">完整重建</button> <button id="cancel">取消</button> <span id="status"></span>
-<script>
-(async function(){
- const id='5e1d5d27-2a38-4b4f-9d5e-0dba1e3b4b18';
- const cfg=await ApiClient.getJSON(ApiClient.getUrl('Plugins/'+id+'/Configuration'));
- workerUrl.value=cfg.WorkerUrl||'http://127.0.0.1:8099'; qdrantUrl.value=cfg.QdrantUrl||'http://127.0.0.1:6333';
- frames.value=cfg.FramesPerVideo||12; visual.value=cfg.VisualWeight??.75; title.value=cfg.TitleWeight??.25;
- save.onclick=async()=>{cfg.WorkerUrl=workerUrl.value;cfg.QdrantUrl=qdrantUrl.value;cfg.FramesPerVideo=+frames.value;cfg.VisualWeight=+visual.value;cfg.TitleWeight=+title.value;await ApiClient.ajax({type:'POST',url:ApiClient.getUrl('Plugins/'+id+'/Configuration'),data:JSON.stringify(cfg),contentType:'application/json'});status.textContent='已保存';};
- ensure.onclick=async()=>{await ApiClient.ajax({type:'POST',url:ApiClient.getUrl('VisualSearch/Index/Ensure')});status.textContent='Qdrant Collection 已初始化';};
- health.onclick=async()=>{const x=await ApiClient.getJSON(ApiClient.getUrl('VisualSearch/Health'));status.textContent='Worker: '+x.status;};
- incremental.onclick=async()=>{await ApiClient.ajax({type:'POST',url:ApiClient.getUrl('VisualSearch/Index/Incremental')});status.textContent='索引任务已排队';};
- rebuild.onclick=async()=>{if(confirm('完整重建会重新处理全部视频，确定继续？')){await ApiClient.ajax({type:'POST',url:ApiClient.getUrl('VisualSearch/Index/Rebuild')});status.textContent='重建任务已排队';}};
- cancel.onclick=async()=>{await ApiClient.ajax({type:'POST',url:ApiClient.getUrl('VisualSearch/Index/Cancel')});status.textContent='已取消';};
-})();
-</script></body></html>
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="utf-8">
+    <title>Visual Search</title>
+</head>
+<body>
+    <div id="VisualSearchConfigPage" data-role="page" class="page type-interior pluginConfigurationPage" data-require="emby-input,emby-button">
+        <div data-role="content">
+            <div class="content-primary">
+                <form id="VisualSearchConfigForm">
+                    <div class="verticalSection verticalSection-extrabottompadding">
+                        <div class="sectionTitleContainer flex align-items-center">
+                            <h2 class="sectionTitle">Visual Search</h2>
+                        </div>
+
+                        <div class="inputContainer">
+                            <label class="inputLabel inputLabelUnfocused" for="vsWorkerUrl">Worker URL</label>
+                            <input id="vsWorkerUrl" type="text" is="emby-input" />
+                            <div class="fieldDescription">Windows 推理节点地址，例如 http://192.168.0.20:8099。</div>
+                        </div>
+
+                        <div class="inputContainer">
+                            <label class="inputLabel inputLabelUnfocused" for="vsQdrantUrl">Qdrant URL</label>
+                            <input id="vsQdrantUrl" type="text" is="emby-input" />
+                            <div class="fieldDescription">当前仅用于记录；实际 Qdrant 地址由 Worker 启动参数 QDRANT_URL / -QdrantUrl 决定。</div>
+                        </div>
+
+                        <div class="inputContainer">
+                            <label class="inputLabel inputLabelUnfocused" for="vsFrames">Frames per video</label>
+                            <input id="vsFrames" type="number" is="emby-input" min="1" max="100" />
+                        </div>
+
+                        <div class="inputContainer">
+                            <label class="inputLabel inputLabelUnfocused" for="vsVisualWeight">Visual weight</label>
+                            <input id="vsVisualWeight" type="number" is="emby-input" min="0" max="1" step="0.05" />
+                        </div>
+
+                        <div class="inputContainer">
+                            <label class="inputLabel inputLabelUnfocused" for="vsTitleWeight">Title weight</label>
+                            <input id="vsTitleWeight" type="number" is="emby-input" min="0" max="1" step="0.05" />
+                        </div>
+
+                        <button is="emby-button" type="submit" class="raised button-submit block emby-button">
+                            <span>保存</span>
+                        </button>
+                    </div>
+                </form>
+
+                <div class="verticalSection">
+                    <h2 class="sectionTitle">连接与索引</h2>
+                    <button id="vsHealth" is="emby-button" type="button" class="raised emby-button"><span>测试 Worker</span></button>
+                    <button id="vsEnsure" is="emby-button" type="button" class="raised emby-button"><span>初始化 Qdrant</span></button>
+                    <button id="vsIncremental" is="emby-button" type="button" class="raised emby-button"><span>开始增量索引</span></button>
+                    <button id="vsRebuild" is="emby-button" type="button" class="raised emby-button"><span>完整重建</span></button>
+                    <button id="vsCancel" is="emby-button" type="button" class="raised emby-button"><span>取消索引</span></button>
+                    <div id="vsStatus" class="fieldDescription" style="margin-top:1em"></div>
+                </div>
+            </div>
+        </div>
+
+        <script type="text/javascript">
+            (function () {
+                const pluginId = '5e1d5d27-2a38-4b4f-9d5e-0dba1e3b4b18';
+                const page = document.querySelector('#VisualSearchConfigPage');
+                const form = page.querySelector('#VisualSearchConfigForm');
+                const status = page.querySelector('#vsStatus');
+
+                function setStatus(message) {
+                    status.textContent = message || '';
+                }
+
+                async function loadConfiguration() {
+                    Dashboard.showLoadingMsg();
+                    setStatus('');
+                    try {
+                        const config = await ApiClient.getPluginConfiguration(pluginId);
+                        page.querySelector('#vsWorkerUrl').value = config.WorkerUrl || 'http://127.0.0.1:8099';
+                        page.querySelector('#vsQdrantUrl').value = config.QdrantUrl || 'http://127.0.0.1:6333';
+                        page.querySelector('#vsFrames').value = config.FramesPerVideo || 12;
+                        page.querySelector('#vsVisualWeight').value = config.VisualWeight ?? 0.75;
+                        page.querySelector('#vsTitleWeight').value = config.TitleWeight ?? 0.25;
+                    } catch (error) {
+                        console.error('[VisualSearch] Failed to load configuration', error);
+                        setStatus('配置加载失败，请查看浏览器控制台和 Jellyfin 日志。');
+                    } finally {
+                        Dashboard.hideLoadingMsg();
+                    }
+                }
+
+                async function runAction(path, successMessage) {
+                    Dashboard.showLoadingMsg();
+                    setStatus('');
+                    try {
+                        await ApiClient.ajax({
+                            type: 'POST',
+                            url: ApiClient.getUrl(path)
+                        });
+                        setStatus(successMessage);
+                    } catch (error) {
+                        console.error('[VisualSearch] Action failed: ' + path, error);
+                        setStatus('操作失败，请查看浏览器控制台和 Jellyfin 日志。');
+                    } finally {
+                        Dashboard.hideLoadingMsg();
+                    }
+                }
+
+                page.addEventListener('pageshow', loadConfiguration);
+
+                form.addEventListener('submit', async function (event) {
+                    event.preventDefault();
+                    Dashboard.showLoadingMsg();
+                    setStatus('');
+                    try {
+                        const config = await ApiClient.getPluginConfiguration(pluginId);
+                        config.WorkerUrl = page.querySelector('#vsWorkerUrl').value.trim();
+                        config.QdrantUrl = page.querySelector('#vsQdrantUrl').value.trim();
+                        config.FramesPerVideo = Number(page.querySelector('#vsFrames').value);
+                        config.VisualWeight = Number(page.querySelector('#vsVisualWeight').value);
+                        config.TitleWeight = Number(page.querySelector('#vsTitleWeight').value);
+                        const result = await ApiClient.updatePluginConfiguration(pluginId, config);
+                        Dashboard.processPluginConfigurationUpdateResult(result);
+                        setStatus('配置已保存。');
+                    } catch (error) {
+                        console.error('[VisualSearch] Failed to save configuration', error);
+                        setStatus('保存失败，请查看浏览器控制台和 Jellyfin 日志。');
+                        Dashboard.hideLoadingMsg();
+                    }
+                    return false;
+                });
+
+                page.querySelector('#vsHealth').addEventListener('click', async function () {
+                    Dashboard.showLoadingMsg();
+                    setStatus('');
+                    try {
+                        const result = await ApiClient.getJSON(ApiClient.getUrl('VisualSearch/Health'));
+                        setStatus('Worker: ' + result.status);
+                    } catch (error) {
+                        console.error('[VisualSearch] Worker health check failed', error);
+                        setStatus('Worker 连接失败。');
+                    } finally {
+                        Dashboard.hideLoadingMsg();
+                    }
+                });
+
+                page.querySelector('#vsEnsure').addEventListener('click', function () {
+                    return runAction('VisualSearch/Index/Ensure', 'Qdrant Collection 已初始化。');
+                });
+                page.querySelector('#vsIncremental').addEventListener('click', function () {
+                    return runAction('VisualSearch/Index/Incremental', '索引任务已排队。');
+                });
+                page.querySelector('#vsRebuild').addEventListener('click', function () {
+                    if (confirm('完整重建会重新处理全部视频，确定继续？')) {
+                        return runAction('VisualSearch/Index/Rebuild', '重建任务已排队。');
+                    }
+                });
+                page.querySelector('#vsCancel').addEventListener('click', function () {
+                    return runAction('VisualSearch/Index/Cancel', '索引任务已取消。');
+                });
+            })();
+        </script>
+    </div>
+</body>
+</html>
