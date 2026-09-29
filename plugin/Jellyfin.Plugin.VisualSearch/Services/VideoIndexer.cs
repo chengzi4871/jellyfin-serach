@@ -7,6 +7,11 @@ using System.Threading.Tasks;
 using MediaBrowser.Controller.Entities;
 using MediaBrowser.Controller.Library;
 using MediaBrowser.Controller.Trickplay;
+using Jellyfin.Database.Implementations.Entities;
+using SixLabors.ImageSharp;
+using SixLabors.ImageSharp.Formats.Jpeg;
+using SixLabors.ImageSharp.Processing;
+using SixLabors.ImageSharp.PixelFormats;
 
 namespace Jellyfin.Plugin.VisualSearch;
 
@@ -35,15 +40,11 @@ public sealed class VideoIndexer
         {
             if (mediaSource.Count == 0) continue;
             var info = mediaSource.OrderBy(x => x.Key).First().Value;
-            var samples = Math.Min(Plugin.Instance?.Configuration.FramesPerVideo ?? 12, info.ThumbnailCount);
-            for (var i = 0; i < samples; i++)
+            var samples = await ReadDistinctFramesAsync(video, info, Plugin.Instance?.Configuration.FramesPerVideo ?? 12, cancellationToken).ConfigureAwait(false);
+            foreach (var sample in samples)
             {
-                var frame = samples == 1 ? 0 : (int)Math.Round(i * (info.ThumbnailCount - 1d) / (samples - 1));
-                var tileIndex = frame / (info.TileWidth * info.TileHeight);
-                var path = await _trickplay.GetTrickplayTilePathAsync(video, info.Width, tileIndex, false).ConfigureAwait(false);
-                if (!File.Exists(path)) continue;
-                var vector = await _client.EmbedImageAsync(await File.ReadAllBytesAsync(path, cancellationToken).ConfigureAwait(false), cancellationToken).ConfigureAwait(false);
-                frames.Add(new { id = DeterministicId(video.Id, frame), vector, payload = new { itemId = video.Id.ToString(), libraryId, frameIndex = frame, timestampMs = frame * info.Interval } });
+                var vector = await _client.EmbedImageAsync(sample.Bytes, cancellationToken).ConfigureAwait(false);
+                frames.Add(new { id = DeterministicId(video.Id, sample.FrameIndex), vector, payload = new { itemId = video.Id.ToString(), libraryId, frameIndex = sample.FrameIndex, timestampMs = (long)sample.FrameIndex * info.Interval } });
             }
         }
         if (frames.Count > 0) await _client.UpsertAsync("jellyfin_video_frames", frames, cancellationToken).ConfigureAwait(false);
@@ -60,19 +61,119 @@ public sealed class VideoIndexer
         {
             if (mediaSource.Count == 0) continue;
             var info = mediaSource.OrderBy(x => x.Key).First().Value;
-            var samples = Math.Min(Math.Max(1, maxFrames), info.ThumbnailCount);
-            for (var i = 0; i < samples; i++)
+            var samples = await ReadDistinctFramesAsync(video, info, Math.Max(1, maxFrames), cancellationToken).ConfigureAwait(false);
+            foreach (var sample in samples)
             {
-                var frame = samples == 1 ? 0 : (int)Math.Round(i * (info.ThumbnailCount - 1d) / (samples - 1));
-                var tileIndex = frame / (info.TileWidth * info.TileHeight);
-                var path = await _trickplay.GetTrickplayTilePathAsync(video, info.Width, tileIndex, false).ConfigureAwait(false);
-                if (!File.Exists(path)) continue;
-                await _client.EmbedImageAsync(await File.ReadAllBytesAsync(path, cancellationToken).ConfigureAwait(false), cancellationToken).ConfigureAwait(false);
+                await _client.EmbedImageAsync(sample.Bytes, cancellationToken).ConfigureAwait(false);
                 framesTested++;
             }
             break;
         }
         return new EmbeddingProbeResult(video.Id.ToString(), video.Name, true, framesTested, null);
+    }
+
+    public async Task<DetailedProbeResult> ProbeDetailedAsync(Video video, int maxFrames, string[] queries, CancellationToken cancellationToken)
+    {
+        var titleText = $"Title: {video.Name}\nOriginal title: {video.OriginalTitle}\nFilename: {Path.GetFileName(video.Path)}";
+        var titleVector = await _client.EmbedTextAsync(titleText, cancellationToken).ConfigureAwait(false);
+        var queryVectors = new Dictionary<string, float[]>();
+        foreach (var query in queries.Where(x => !string.IsNullOrWhiteSpace(x)).Take(20))
+            queryVectors[query] = await _client.EmbedTextAsync(query.Trim(), cancellationToken).ConfigureAwait(false);
+
+        var frames = new List<ProbeFrame>();
+        var manifest = await _trickplay.GetTrickplayManifest(video).ConfigureAwait(false);
+        foreach (var mediaSource in manifest.Values)
+        {
+            if (mediaSource.Count == 0) continue;
+            var info = mediaSource.OrderBy(x => x.Key).First().Value;
+            var samples = await ReadDistinctFramesAsync(video, info, Math.Max(1, maxFrames), cancellationToken).ConfigureAwait(false);
+            foreach (var sample in samples)
+            {
+                var frame = sample.FrameIndex;
+                var frameBytes = sample.Bytes;
+                var vector = await _client.EmbedImageAsync(frameBytes, cancellationToken).ConfigureAwait(false);
+                var scores = queryVectors.ToDictionary(x => x.Key, x => Cosine(x.Value, vector));
+                frames.Add(new ProbeFrame(frame, (long)frame * info.Interval, $"data:image/jpeg;base64,{Convert.ToBase64String(frameBytes)}", VectorSummary.From(vector), scores));
+            }
+            break;
+        }
+        var titleScores = queryVectors.ToDictionary(x => x.Key, x => Cosine(x.Value, titleVector));
+        return new DetailedProbeResult(video.Id.ToString(), video.Name, titleText, VectorSummary.From(titleVector), titleScores, frames, queryVectors.Keys.ToArray());
+    }
+
+    private static async Task<byte[]> ReadFrameAsync(string tilePath, int frame, TrickplayInfo info, CancellationToken cancellationToken)
+    {
+        await using var input = File.OpenRead(tilePath);
+        using var image = await Image.LoadAsync(input, cancellationToken).ConfigureAwait(false);
+        var column = frame % info.TileWidth;
+        var row = (frame / info.TileWidth) % info.TileHeight;
+        var x = column * info.Width;
+        var y = row * info.Height;
+        if (x >= image.Width || y >= image.Height) throw new InvalidDataException("Trickplay frame is outside tile bounds");
+        var width = Math.Min(info.Width, image.Width - x);
+        var height = Math.Min(info.Height, image.Height - y);
+        image.Mutate(ctx => ctx.Crop(new Rectangle(x, y, width, height)));
+        await using var output = new MemoryStream();
+        await image.SaveAsJpegAsync(output, new JpegEncoder { Quality = 85 }, cancellationToken).ConfigureAwait(false);
+        return output.ToArray();
+    }
+
+    private async Task<IReadOnlyList<FrameSample>> ReadDistinctFramesAsync(Video video, TrickplayInfo info, int maxFrames, CancellationToken cancellationToken)
+    {
+        var estimatedSeconds = Math.Max(1d, info.ThumbnailCount * info.Interval / 1000d);
+        var target = (int)Math.Ceiling(estimatedSeconds / 30d);
+        var sampleCount = Math.Min(info.ThumbnailCount, Math.Min(Math.Max(1, maxFrames), Math.Max(6, target)));
+        var indices = Enumerable.Range(0, sampleCount).Select(i => sampleCount == 1 ? 0 : (int)Math.Round(i * (info.ThumbnailCount - 1d) / (sampleCount - 1))).Distinct().ToList();
+        var kept = new List<FrameSample>();
+        foreach (var frame in indices)
+        {
+            var tileIndex = frame / (info.TileWidth * info.TileHeight);
+            var path = await _trickplay.GetTrickplayTilePathAsync(video, info.Width, tileIndex, false).ConfigureAwait(false);
+            if (!File.Exists(path)) continue;
+            var bytes = await ReadFrameAsync(path, frame, info, cancellationToken).ConfigureAwait(false);
+            if (frame != indices[0] && frame != indices[^1] && kept.Any(x => IsNearDuplicate(x.Bytes, bytes))) continue;
+            kept.Add(new FrameSample(frame, bytes));
+        }
+        return kept;
+    }
+
+    private static bool IsNearDuplicate(byte[] first, byte[] second)
+    {
+        using var a = Image.Load<Rgba32>(first);
+        using var b = Image.Load<Rgba32>(second);
+        var colorDistance = AverageColorDistance(a, b);
+        if (colorDistance > 18) return false;
+        a.Mutate(x => x.Resize(9, 8).Grayscale());
+        b.Mutate(x => x.Resize(9, 8).Grayscale());
+        ulong ha = 0, hb = 0;
+        for (var y = 0; y < 8; y++) for (var x = 0; x < 8; x++)
+        {
+            if (a[x, y].R > a[x + 1, y].R) ha |= 1UL << (y * 8 + x);
+            if (b[x, y].R > b[x + 1, y].R) hb |= 1UL << (y * 8 + x);
+        }
+        var distance = System.Numerics.BitOperations.PopCount(ha ^ hb);
+        return distance <= 5;
+    }
+
+    private static double AverageColorDistance(Image<Rgba32> first, Image<Rgba32> second)
+    {
+        first.Mutate(x => x.Resize(8, 8));
+        second.Mutate(x => x.Resize(8, 8));
+        double total = 0;
+        for (var y = 0; y < 8; y++) for (var x = 0; x < 8; x++)
+        {
+            var p = first[x, y]; var q = second[x, y];
+            total += (Math.Abs(p.R - q.R) + Math.Abs(p.G - q.G) + Math.Abs(p.B - q.B)) / 3d;
+        }
+        return total / 64d;
+    }
+
+    private static double Cosine(IReadOnlyList<float> a, IReadOnlyList<float> b)
+    {
+        if (a.Count != b.Count || a.Count == 0) return 0;
+        double dot = 0, aa = 0, bb = 0;
+        for (var i = 0; i < a.Count; i++) { dot += a[i] * b[i]; aa += a[i] * a[i]; bb += b[i] * b[i]; }
+        return aa == 0 || bb == 0 ? 0 : dot / (Math.Sqrt(aa) * Math.Sqrt(bb));
     }
 
     private static string DeterministicId(Guid itemId, int frame)
@@ -82,4 +183,18 @@ public sealed class VideoIndexer
     }
 }
 
+internal sealed record FrameSample(int FrameIndex, byte[] Bytes);
+
 public sealed record EmbeddingProbeResult(string ItemId, string Title, bool TextAccepted, int FramesTested, string? Error);
+public sealed record DetailedProbeResult(string ItemId, string Title, string TitleInput, VectorSummary TitleVector, IReadOnlyDictionary<string, double> TitleQueryScores, IReadOnlyList<ProbeFrame> Frames, IReadOnlyList<string> Queries);
+public sealed record ProbeFrame(int FrameIndex, long TimestampMs, string ImageDataUrl, VectorSummary Vector, IReadOnlyDictionary<string, double> QueryScores);
+public sealed record VectorSummary(int Dimension, double Norm, double Min, double Max, double Mean, IReadOnlyList<double> FirstValues)
+{
+    public static VectorSummary From(IReadOnlyList<float> vector)
+    {
+        if (vector.Count == 0) return new(0, 0, 0, 0, 0, Array.Empty<double>());
+        var min = vector.Min(); var max = vector.Max(); var mean = vector.Average(x => (double)x);
+        var norm = Math.Sqrt(vector.Sum(x => (double)x * x));
+        return new(vector.Count, norm, min, max, mean, vector.Take(8).Select(x => (double)x).ToArray());
+    }
+}
