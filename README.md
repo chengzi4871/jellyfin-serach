@@ -145,16 +145,14 @@ $env:QDRANT_URL = "http://192.168.1.20:6333"
 GitHub Actions 成功后，在仓库的 Actions → CI → Artifacts 下载 `visual-search-plugin.zip`。解压到 Jellyfin 的插件目录。Docker 安装通常类似：
 
 ```bash
-mkdir -p /你的Jellyfin配置目录/plugins/VisualSearch_0.1.0.2
-unzip visual-search-plugin.zip -d /你的Jellyfin配置目录/plugins/VisualSearch_0.1.0.2
+mkdir -p /你的Jellyfin配置目录/plugins/VisualSearch_0.1.0.0
+unzip visual-search-plugin.zip -d /你的Jellyfin配置目录/plugins/VisualSearch_0.1.0.0
 docker restart jellyfin
 ```
 
-如果你的 Docker Compose 使用了命名卷，先通过 `docker volume inspect` 找到实际配置卷，或把插件目录复制到容器内的 `/config/plugins/VisualSearch_0.1.0.2`。安装后在 Jellyfin 管理后台的插件页面确认 **Visual Search** 已加载。
+如果你的 Docker Compose 使用了命名卷，先通过 `docker volume inspect` 找到实际配置卷，或把插件目录复制到容器内的 `/config/plugins/VisualSearch_0.1.0.0`。安装后在 Jellyfin 管理后台的插件页面确认 **Visual Search** 已加载。
 
 ### 4. 配置插件
-
-当前版本已通过 `EnableInMainMenu` 注册到 Jellyfin 管理后台左侧栏，重启并刷新浏览器后可直接点击 **Visual Search**；Dashboard → Plugins → Visual Search 仍保留作为备用入口。
 
 在插件设置中填写 Worker 地址；Qdrant 地址由 Windows Worker 的启动参数配置：
 
@@ -173,6 +171,18 @@ Title weight: 0.25
 ```json
 {"itemId":"Jellyfin视频ID","libraryId":"媒体库ID"}
 ```
+
+### 语义能力小批量验收
+
+在配置页的“语义能力验收”区域，可以随机抽取 1～10 个视频、每个视频抽取 1～8 张 Trickplay 单帧，并输入多行查询词。插件会返回并展示：实际送入模型的标题文本、实际送入模型的单帧图片、向量维度/范数/范围/前 8 个维度，以及每个查询词与每一帧的余弦相似度。该接口不写入正式 Qdrant 集合，适合在大批量索引前比较模型能力。例如分别输入“沙滩上的猛男”“沙滩上的美女”“红色比基尼”“蓝色比基尼”“黑发”“金发”，观察同一组图片的分数排序。相似度只表示当前模型空间中的接近程度，不等于模型生成了可读标签；应比较同一组图片在不同查询词、不同模型下的相对排序。
+
+接口为 `POST /VisualSearch/Test/Inspect`：
+
+```json
+{"count":2,"framesPerVideo":3,"queries":["沙滩上的猛男","红色比基尼","金发"]}
+```
+
+返回结果中的 `titleInput`、`frames[].imageDataUrl` 和 `frames[].queryScores` 分别对应标题输入、图片输入和查询相似度。插件现在会先从 Trickplay 拼图中裁出单独帧，再发送给 Worker；正式索引和小批量测试使用同一处理方式。
 
 插件从 Jellyfin 的 Trickplay manifest 读取 `Interval`、`ThumbnailCount`、`TileWidth`、`TileHeight` 和 `Width`，按实际 tile 布局采样，不重新解码原视频。
 
