@@ -185,6 +185,35 @@ public sealed class VisualSearchController : ControllerBase
         return Ok(new { status = "completed", worker, requestedVideos = count, testedVideos = results.Count, framesPerVideo = frames, results });
     }
 
+    /// <summary>Returns the exact title text and individual frame images used for embedding, plus query-to-frame cosine scores.</summary>
+    [HttpPost("Test/Inspect")]
+    public async Task<ActionResult> Inspect([FromBody] InspectRequest? request, CancellationToken cancellationToken)
+    {
+        var count = Math.Clamp(request?.Count ?? 3, 1, 10);
+        var frames = Math.Clamp(request?.FramesPerVideo ?? 3, 1, 8);
+        var queries = (request?.Queries ?? Array.Empty<string>()).Where(x => !string.IsNullOrWhiteSpace(x)).Select(x => x.Trim()).Distinct(StringComparer.OrdinalIgnoreCase).Take(20).ToArray();
+        if (queries.Length == 0) return BadRequest("at least one query is required");
+        var videos = new List<MediaBrowser.Controller.Entities.Video>();
+        foreach (var rawId in request?.ItemIds ?? Array.Empty<string>())
+        {
+            if (Guid.TryParse(rawId, out var id) && _libraryManager.GetItemById<MediaBrowser.Controller.Entities.Video>(id) is { } video) videos.Add(video);
+        }
+        if (videos.Count == 0)
+        {
+            videos = _libraryManager.GetItemList(new MediaBrowser.Controller.Entities.InternalItemsQuery
+            {
+                MediaTypes = new[] { Jellyfin.Data.Enums.MediaType.Video }, IsVirtualItem = false, IsFolder = false, Recursive = true
+            }).OfType<MediaBrowser.Controller.Entities.Video>().OrderBy(_ => Guid.NewGuid()).Take(count).ToList();
+        }
+        var results = new List<DetailedProbeResult>();
+        foreach (var video in videos.Take(count))
+        {
+            try { results.Add(await _indexer.ProbeDetailedAsync(video, frames, queries, cancellationToken).ConfigureAwait(false)); }
+            catch (Exception ex) { results.Add(new DetailedProbeResult(video.Id.ToString(), video.Name, $"ERROR: {ex.Message}", new VectorSummary(0, 0, 0, 0, 0, Array.Empty<double>()), new Dictionary<string, double>(), Array.Empty<ProbeFrame>(), queries)); }
+        }
+        return Ok(new { status = "completed", count = results.Count, queries, results });
+    }
+
     private Guid GetUserId()
     {
         var claim = User.FindFirst("Jellyfin-UserId")?.Value ?? User.FindFirst(ClaimTypes.NameIdentifier)?.Value;
@@ -195,6 +224,7 @@ public sealed class VisualSearchController : ControllerBase
 public sealed record SearchRequest(string Query, string[]? LibraryIds = null, int Limit = 30);
 public sealed record IndexItemRequest(string ItemId, string? LibraryId = null);
 public sealed record RandomTestRequest(int Count = 3, int FramesPerVideo = 2);
+public sealed record InspectRequest(int Count = 3, int FramesPerVideo = 3, string[]? Queries = null, string[]? ItemIds = null);
 public sealed record SearchResponse(string Query, SearchResult[] Results, long ElapsedMs);
 public sealed record SearchResult(string ItemId, string Title, double Score, double? VisualScore, double? TitleScore, BestFrame? BestFrame);
 public sealed record BestFrame(int FrameIndex, long TimestampMs, double Score);
