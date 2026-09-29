@@ -8,7 +8,8 @@
 <label>Frames per video <input id="frames" type="number" min="1" max="100"></label><br><br>
 <label>Visual weight <input id="visual" type="number" min="0" max="1" step="0.05"></label><br><br>
 <label>Title weight <input id="title" type="number" min="0" max="1" step="0.05"></label><br><br>
-<button id="save">保存</button> <button id="ensure">初始化 Qdrant</button> <button id="health">测试 Worker</button> <span id="status"></span>
+<button id="save">保存</button> <button id="ensure">初始化 Qdrant</button> <button id="health">测试 Worker</button><br><br>
+<button id="incremental">开始增量索引</button> <button id="rebuild">完整重建</button> <button id="cancel">取消</button> <span id="status"></span>
 <script>
 (async function(){
  const id='5e1d5d27-2a38-4b4f-9d5e-0dba1e3b4b18';
@@ -18,5 +19,8 @@
  save.onclick=async()=>{cfg.WorkerUrl=workerUrl.value;cfg.QdrantUrl=qdrantUrl.value;cfg.FramesPerVideo=+frames.value;cfg.VisualWeight=+visual.value;cfg.TitleWeight=+title.value;await ApiClient.ajax({type:'POST',url:ApiClient.getUrl('Plugins/'+id+'/Configuration'),data:JSON.stringify(cfg),contentType:'application/json'});status.textContent='已保存';};
  ensure.onclick=async()=>{await ApiClient.ajax({type:'POST',url:ApiClient.getUrl('VisualSearch/Index/Ensure')});status.textContent='Qdrant Collection 已初始化';};
  health.onclick=async()=>{const x=await ApiClient.getJSON(ApiClient.getUrl('VisualSearch/Health'));status.textContent='Worker: '+x.status;};
+ incremental.onclick=async()=>{await ApiClient.ajax({type:'POST',url:ApiClient.getUrl('VisualSearch/Index/Incremental')});status.textContent='索引任务已排队';};
+ rebuild.onclick=async()=>{if(confirm('完整重建会重新处理全部视频，确定继续？')){await ApiClient.ajax({type:'POST',url:ApiClient.getUrl('VisualSearch/Index/Rebuild')});status.textContent='重建任务已排队';}};
+ cancel.onclick=async()=>{await ApiClient.ajax({type:'POST',url:ApiClient.getUrl('VisualSearch/Index/Cancel')});status.textContent='已取消';};
 })();
 </script></body></html>
