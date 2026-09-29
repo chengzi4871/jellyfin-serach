@@ -24,27 +24,13 @@ jobs:
       - uses: actions/setup-dotnet@v4
         with:
           dotnet-version: '9.0.x'
-
-      - name: Build plugin
-        run: dotnet build plugin/Jellyfin.Plugin.VisualSearch/Jellyfin.Plugin.VisualSearch.csproj --configuration Release
-
-      - name: Assemble Jellyfin plugin artifact
-        shell: bash
-        run: |
-          set -euo pipefail
-          BUILD_DIR="plugin/Jellyfin.Plugin.VisualSearch/bin/Release/net9.0"
-          PACKAGE_DIR="artifact/VisualSearch_0.1.0.2"
-          mkdir -p "$PACKAGE_DIR"
-          cp "$BUILD_DIR/Jellyfin.Plugin.VisualSearch.dll" "$PACKAGE_DIR/"
-          cp "$BUILD_DIR/Jellyfin.Plugin.VisualSearch.pdb" "$PACKAGE_DIR/"
-          cp plugin/Jellyfin.Plugin.VisualSearch/meta.json "$PACKAGE_DIR/"
-
-          test "$(find "$PACKAGE_DIR" -maxdepth 1 -type f -name '*.dll' | wc -l)" -eq 1
-          test "$(find "$PACKAGE_DIR" -maxdepth 1 -type f | wc -l)" -eq 3
-          find "$PACKAGE_DIR" -maxdepth 1 -type f -printf '%f\n' | sort
-
+      - run: dotnet build plugin/Jellyfin.Plugin.VisualSearch/Jellyfin.Plugin.VisualSearch.csproj --configuration Release
+      - run: dotnet publish plugin/Jellyfin.Plugin.VisualSearch/Jellyfin.Plugin.VisualSearch.csproj --configuration Release --output publish
+      - name: Verify plugin dependencies
+        run: test -s publish/SixLabors.ImageSharp.dll
+      - run: cp plugin/Jellyfin.Plugin.VisualSearch/meta.json publish/meta.json
+      - run: cd publish && zip -r ../visual-search-plugin.zip .
       - uses: actions/upload-artifact@v4
         with:
           name: visual-search-plugin
-          path: artifact/
-          if-no-files-found: error
+          path: visual-search-plugin.zip
