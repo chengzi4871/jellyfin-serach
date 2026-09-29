@@ -5,9 +5,7 @@ using System.Linq;
 using System.Net.Http;
 using System.Security.Claims;
 using System.IO;
-using System.Collections.Generic;
 using MediaBrowser.Controller.Library;
-using MediaBrowser.Controller.Trickplay;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
 
@@ -21,14 +19,16 @@ public sealed class VisualSearchController : ControllerBase
     private readonly VisualSearchState _state;
     private readonly VisualSearchClient _client;
     private readonly ILibraryManager _libraryManager;
-    private readonly ITrickplayManager _trickplayManager;
+    private readonly VideoIndexer _indexer;
+    private readonly IndexCoordinator _coordinator;
 
-    public VisualSearchController(VisualSearchState state, VisualSearchClient client, ILibraryManager libraryManager, ITrickplayManager trickplayManager)
+    public VisualSearchController(VisualSearchState state, VisualSearchClient client, ILibraryManager libraryManager, VideoIndexer indexer, IndexCoordinator coordinator)
     {
         _state = state;
         _client = client;
         _libraryManager = libraryManager;
-        _trickplayManager = trickplayManager;
+        _indexer = indexer;
+        _coordinator = coordinator;
     }
 
     [HttpGet("Health")]
@@ -90,7 +90,7 @@ public sealed class VisualSearchController : ControllerBase
     }
 
     [HttpPost("Index/Incremental")]
-    public IActionResult Incremental() { _state.Status = "queued"; return Accepted(); }
+    public IActionResult Incremental() { _coordinator.Start(); return Accepted(new { status = "queued" }); }
 
     [HttpPost("Index/Ensure")]
     public async Task<IActionResult> Ensure(CancellationToken cancellationToken)
@@ -100,7 +100,7 @@ public sealed class VisualSearchController : ControllerBase
     }
 
     [HttpPost("Index/Rebuild")]
-    public IActionResult Rebuild() { _state.Status = "queued_rebuild"; return Accepted(); }
+    public IActionResult Rebuild() { _coordinator.Cancel(); _state.IndexedVideos = 0; _state.FailedVideos = 0; _coordinator.Start(); return Accepted(new { status = "queued_rebuild" }); }
 
     [HttpPost("Index/Pause")]
     public IActionResult Pause() { _state.Status = "paused"; return Ok(); }
@@ -109,7 +109,7 @@ public sealed class VisualSearchController : ControllerBase
     public IActionResult Resume() { _state.Status = "queued"; return Ok(); }
 
     [HttpPost("Index/Cancel")]
-    public IActionResult Cancel() { _state.Status = "cancelled"; return Ok(); }
+    public IActionResult Cancel() { _coordinator.Cancel(); return Ok(); }
 
     [HttpPost("Index/Item")]
     public async Task<ActionResult> IndexItem([FromBody] IndexItemRequest request, CancellationToken cancellationToken)
@@ -120,41 +120,10 @@ public sealed class VisualSearchController : ControllerBase
         }
         _state.Status = "processing";
         var libraryId = request.LibraryId ?? string.Empty;
-        var text = $"Title: {video.Name}\nOriginal title: {video.OriginalTitle}\nFilename: {Path.GetFileName(video.Path)}";
-        await _client.UpsertAsync("jellyfin_video_text", new[]
-        {
-            new { id = video.Id.ToString(), vector = await _client.EmbedTextAsync(text, cancellationToken), payload = new { itemId = video.Id.ToString(), libraryId, textHash = text.GetHashCode().ToString() } }
-        }, cancellationToken).ConfigureAwait(false);
-
-        var manifest = await _trickplayManager.GetTrickplayManifest(video).ConfigureAwait(false);
-        var points = new List<object>();
-        foreach (var mediaSource in manifest.Values)
-        {
-            if (mediaSource.Count == 0) continue;
-            var info = mediaSource.OrderBy(x => x.Key).First().Value;
-            var samples = Math.Min(Plugin.Instance?.Configuration.FramesPerVideo ?? 12, info.ThumbnailCount);
-            for (var i = 0; i < samples; i++)
-            {
-                var frame = samples == 1 ? 0 : (int)Math.Round(i * (info.ThumbnailCount - 1d) / (samples - 1));
-                var capacity = info.TileWidth * info.TileHeight;
-                var tileIndex = frame / capacity;
-                var tilePath = await _trickplayManager.GetTrickplayTilePathAsync(video, info.Width, tileIndex, false).ConfigureAwait(false);
-                if (!System.IO.File.Exists(tilePath)) continue;
-                var vector = await _client.EmbedImageAsync(await System.IO.File.ReadAllBytesAsync(tilePath, cancellationToken).ConfigureAwait(false), cancellationToken).ConfigureAwait(false);
-                points.Add(new { id = DeterministicId(video.Id, frame), vector, payload = new { itemId = video.Id.ToString(), libraryId, frameIndex = frame, timestampMs = frame * info.Interval } });
-            }
-        }
-        if (points.Count > 0) await _client.UpsertAsync("jellyfin_video_frames", points, cancellationToken).ConfigureAwait(false);
+        var indexed = await _indexer.IndexAsync(video, libraryId, cancellationToken).ConfigureAwait(false);
         _state.IndexedVideos++;
         _state.Status = "ready";
-        return Ok(new { itemId = video.Id, textIndexed = true, framesIndexed = points.Count });
-    }
-
-    private static string DeterministicId(Guid itemId, int frame)
-    {
-        using var md5 = System.Security.Cryptography.MD5.Create();
-        var bytes = md5.ComputeHash(System.Text.Encoding.UTF8.GetBytes($"{itemId:N}:{frame}"));
-        return new Guid(bytes).ToString();
+        return Ok(new { itemId = video.Id, textIndexed = indexed.Text, framesIndexed = indexed.Frames });
     }
 
     private Guid GetUserId()

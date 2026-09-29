@@ -12,6 +12,8 @@ public sealed class PluginServiceRegistrator : IPluginServiceRegistrator
     {
         serviceCollection.AddSingleton<VisualSearchState>();
         serviceCollection.AddSingleton<JellyfinAdapter>();
+        serviceCollection.AddSingleton<VideoIndexer>();
+        serviceCollection.AddSingleton<IndexCoordinator>();
         serviceCollection.AddTransient<IStartupFilter, IndexHtmlScriptStartupFilter>();
         serviceCollection.AddHttpClient<VisualSearchClient>((provider, client) =>
         {
