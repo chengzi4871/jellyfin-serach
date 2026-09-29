@@ -1,0 +1,22 @@
+<!doctype html>
+<html><head><meta charset="utf-8"><title>Visual Search</title></head>
+<body style="font-family:sans-serif;padding:1em">
+<h2>Visual Search</h2>
+<p>配置 Worker、Qdrant 和索引参数。保存后刷新 Web 客户端。</p>
+<label>Worker URL <input id="workerUrl" style="width:28em"></label><br><br>
+<label>Qdrant URL <input id="qdrantUrl" style="width:28em"></label><br><br>
+<label>Frames per video <input id="frames" type="number" min="1" max="100"></label><br><br>
+<label>Visual weight <input id="visual" type="number" min="0" max="1" step="0.05"></label><br><br>
+<label>Title weight <input id="title" type="number" min="0" max="1" step="0.05"></label><br><br>
+<button id="save">保存</button> <button id="ensure">初始化 Qdrant</button> <button id="health">测试 Worker</button> <span id="status"></span>
+<script>
+(async function(){
+ const id='5e1d5d27-2a38-4b4f-9d5e-0dba1e3b4b18';
+ const cfg=await ApiClient.getJSON(ApiClient.getUrl('Plugins/'+id+'/Configuration'));
+ workerUrl.value=cfg.WorkerUrl||'http://127.0.0.1:8099'; qdrantUrl.value=cfg.QdrantUrl||'http://127.0.0.1:6333';
+ frames.value=cfg.FramesPerVideo||12; visual.value=cfg.VisualWeight??.75; title.value=cfg.TitleWeight??.25;
+ save.onclick=async()=>{cfg.WorkerUrl=workerUrl.value;cfg.QdrantUrl=qdrantUrl.value;cfg.FramesPerVideo=+frames.value;cfg.VisualWeight=+visual.value;cfg.TitleWeight=+title.value;await ApiClient.ajax({type:'POST',url:ApiClient.getUrl('Plugins/'+id+'/Configuration'),data:JSON.stringify(cfg),contentType:'application/json'});status.textContent='已保存';};
+ ensure.onclick=async()=>{await ApiClient.ajax({type:'POST',url:ApiClient.getUrl('VisualSearch/Index/Ensure')});status.textContent='Qdrant Collection 已初始化';};
+ health.onclick=async()=>{const x=await ApiClient.getJSON(ApiClient.getUrl('VisualSearch/Health'));status.textContent='Worker: '+x.status;};
+})();
+</script></body></html>

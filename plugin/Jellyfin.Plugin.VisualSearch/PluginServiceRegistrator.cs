@@ -1,6 +1,8 @@
 using MediaBrowser.Controller;
 using MediaBrowser.Controller.Plugins;
 using Microsoft.Extensions.DependencyInjection;
+using Microsoft.AspNetCore.Hosting;
+using Jellyfin.Plugin.VisualSearch.Web;
 
 namespace Jellyfin.Plugin.VisualSearch;
 
@@ -10,6 +12,12 @@ public sealed class PluginServiceRegistrator : IPluginServiceRegistrator
     {
         serviceCollection.AddSingleton<VisualSearchState>();
         serviceCollection.AddSingleton<JellyfinAdapter>();
+        serviceCollection.AddTransient<IStartupFilter, IndexHtmlScriptStartupFilter>();
+        serviceCollection.AddHttpClient<VisualSearchClient>((provider, client) =>
+        {
+            client.BaseAddress = new System.Uri(Plugin.Instance?.Configuration.WorkerUrl ?? "http://127.0.0.1:8099");
+            client.Timeout = System.TimeSpan.FromSeconds(3);
+        });
     }
 }
 

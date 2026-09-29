@@ -25,3 +25,10 @@ jobs:
         with:
           dotnet-version: '9.0.x'
       - run: dotnet build plugin/Jellyfin.Plugin.VisualSearch/Jellyfin.Plugin.VisualSearch.csproj --configuration Release
+      - run: dotnet publish plugin/Jellyfin.Plugin.VisualSearch/Jellyfin.Plugin.VisualSearch.csproj --configuration Release --output publish
+      - run: cp plugin/Jellyfin.Plugin.VisualSearch/meta.json publish/meta.json
+      - run: cd publish && zip -r ../visual-search-plugin.zip .
+      - uses: actions/upload-artifact@v4
+        with:
+          name: visual-search-plugin
+          path: visual-search-plugin.zip

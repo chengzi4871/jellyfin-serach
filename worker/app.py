@@ -7,7 +7,8 @@ from typing import Any
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel, Field
 
-from provider import MockEmbeddingProvider
+from provider import create_provider
+from qdrant import QdrantConfig, QdrantRepository, TEXT_COLLECTION, FRAME_COLLECTION
 
 
 class TextRequest(BaseModel):
@@ -22,13 +23,44 @@ class ImagesRequest(BaseModel):
     images_base64: list[str] = Field(min_length=1)
 
 
-provider = MockEmbeddingProvider(int(os.getenv("EMBEDDING_DIMENSION", "1024")))
+provider = create_provider()
+qdrant = QdrantRepository(QdrantConfig(
+    url=os.getenv("QDRANT_URL", "http://127.0.0.1:6333"),
+    dimension=provider.info.dimension,
+))
 app = FastAPI(title="Jellyfin Visual Search Embedding Worker", version="0.1.0")
 
 
 @app.get("/health")
 def health() -> dict[str, Any]:
-    return {"status": "ready", **provider.info.__dict__}
+    return {"status": "ready", "qdrantConfigured": bool(os.getenv("QDRANT_URL")), **provider.info.__dict__}
+
+
+@app.post("/qdrant/ensure")
+async def ensure_qdrant() -> dict[str, Any]:
+    await qdrant.ensure_collections()
+    return {"status": "ready", "collections": [TEXT_COLLECTION, FRAME_COLLECTION]}
+
+
+@app.post("/qdrant/upsert")
+async def qdrant_upsert(request: dict[str, Any]) -> dict[str, Any]:
+    collection = request.get("collection")
+    points = request.get("points")
+    if collection not in (TEXT_COLLECTION, FRAME_COLLECTION) or not isinstance(points, list):
+        raise HTTPException(status_code=400, detail="collection and points are required")
+    return await qdrant.upsert(collection, points)
+
+
+@app.post("/qdrant/search")
+async def qdrant_search(request: dict[str, Any]) -> dict[str, Any]:
+    collection = request.get("collection")
+    if collection not in (TEXT_COLLECTION, FRAME_COLLECTION):
+        raise HTTPException(status_code=400, detail="invalid collection")
+    vector = request.get("vector")
+    if not isinstance(vector, list):
+        raise HTTPException(status_code=400, detail="vector is required")
+    result = await qdrant.search(collection, vector, int(request.get("limit", 100)), request.get("filter"))
+    return {"result": result}
 
 
 @app.post("/embed/text")

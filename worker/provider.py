@@ -35,3 +35,11 @@ class MockEmbeddingProvider:
 
     def embed_image(self, image_bytes: bytes) -> list[float]:
         return self._embed(image_bytes)
+
+
+def create_provider() -> EmbeddingProvider:
+    import os
+    if os.getenv("EMBEDDING_PROVIDER", "mock").lower() == "qwen":
+        from qwen_provider import QwenEmbeddingProvider
+        return QwenEmbeddingProvider()
+    return MockEmbeddingProvider(int(os.getenv("EMBEDDING_DIMENSION", "1024")))

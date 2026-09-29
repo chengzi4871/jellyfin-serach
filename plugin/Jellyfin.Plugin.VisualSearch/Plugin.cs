@@ -22,7 +22,7 @@ public sealed class Plugin : BasePlugin<PluginConfiguration>, IHasWebPages
         new PluginPageInfo
         {
             Name = "VisualSearch",
-            EmbeddedResourcePath = "Jellyfin.Plugin.VisualSearch.Web.visual-search.js"
+            EmbeddedResourcePath = "Jellyfin.Plugin.VisualSearch.Web.configPage.html"
         }
     };
 }
