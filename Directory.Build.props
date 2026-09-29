@@ -1,0 +1,10 @@
+<Project>
+  <PropertyGroup>
+    <!-- Override this once the real server patch version is confirmed. -->
+    <JellyfinVersion>10.11.0</JellyfinVersion>
+    <TargetFramework>net9.0</TargetFramework>
+    <Nullable>enable</Nullable>
+    <LangVersion>latest</LangVersion>
+    <TreatWarningsAsErrors>false</TreatWarningsAsErrors>
+  </PropertyGroup>
+</Project>

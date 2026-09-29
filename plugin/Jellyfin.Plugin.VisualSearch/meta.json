@@ -1,0 +1,10 @@
+{
+  "guid": "5e1d5d27-2a38-4b4f-9d5e-0dba1e3b4b18",
+  "name": "Visual Search",
+  "description": "Video-level multimodal semantic search using titles and Jellyfin Trickplay frames.",
+  "overview": "Search personal videos by natural-language visual and title meaning.",
+  "owner": "chengzi4871",
+  "category": "General",
+  "targetAbi": "10.11.0.0",
+  "version": "0.1.0.0"
+}

@@ -1,0 +1,19 @@
+services:
+  qdrant:
+    image: qdrant/qdrant:v1.13.6
+    restart: unless-stopped
+    ports:
+      - "6333:6333"
+      - "6334:6334"
+    volumes:
+      - qdrant_storage:/qdrant/storage
+  worker:
+    build: ./worker
+    restart: unless-stopped
+    ports:
+      - "8099:8099"
+    environment:
+      EMBEDDING_DIMENSION: "1024"
+    profiles: [worker]
+volumes:
+  qdrant_storage:
