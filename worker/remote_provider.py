@@ -7,7 +7,10 @@ from typing import Any
 
 import httpx
 
-from provider import EmbeddingInfo, EmbeddingProvider
+try:
+    from .provider import EmbeddingInfo, EmbeddingProvider
+except ImportError:  # uvicorn app:app from the worker directory
+    from provider import EmbeddingInfo, EmbeddingProvider
 
 
 class RemoteEmbeddingProvider:
