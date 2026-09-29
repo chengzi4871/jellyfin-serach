@@ -50,9 +50,36 @@ public sealed class VideoIndexer
         return (true, frames.Count);
     }
 
+    public async Task<EmbeddingProbeResult> ProbeAsync(Video video, int maxFrames, CancellationToken cancellationToken)
+    {
+        var text = $"Title: {video.Name}\nOriginal title: {video.OriginalTitle}\nFilename: {Path.GetFileName(video.Path)}";
+        await _client.EmbedTextAsync(text, cancellationToken).ConfigureAwait(false);
+        var framesTested = 0;
+        var manifest = await _trickplay.GetTrickplayManifest(video).ConfigureAwait(false);
+        foreach (var mediaSource in manifest.Values)
+        {
+            if (mediaSource.Count == 0) continue;
+            var info = mediaSource.OrderBy(x => x.Key).First().Value;
+            var samples = Math.Min(Math.Max(1, maxFrames), info.ThumbnailCount);
+            for (var i = 0; i < samples; i++)
+            {
+                var frame = samples == 1 ? 0 : (int)Math.Round(i * (info.ThumbnailCount - 1d) / (samples - 1));
+                var tileIndex = frame / (info.TileWidth * info.TileHeight);
+                var path = await _trickplay.GetTrickplayTilePathAsync(video, info.Width, tileIndex, false).ConfigureAwait(false);
+                if (!File.Exists(path)) continue;
+                await _client.EmbedImageAsync(await File.ReadAllBytesAsync(path, cancellationToken).ConfigureAwait(false), cancellationToken).ConfigureAwait(false);
+                framesTested++;
+            }
+            break;
+        }
+        return new EmbeddingProbeResult(video.Id.ToString(), video.Name, true, framesTested, null);
+    }
+
     private static string DeterministicId(Guid itemId, int frame)
     {
         using var md5 = System.Security.Cryptography.MD5.Create();
         return new Guid(md5.ComputeHash(System.Text.Encoding.UTF8.GetBytes($"{itemId:N}:{frame}"))).ToString();
     }
 }
+
+public sealed record EmbeddingProbeResult(string ItemId, string Title, bool TextAccepted, int FramesTested, string? Error);
