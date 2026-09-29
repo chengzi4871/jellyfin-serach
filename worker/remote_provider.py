@@ -95,4 +95,11 @@ class RemoteEmbeddingProvider:
 
     def embed_image(self, image_bytes: bytes) -> list[float]:
         encoded = base64.b64encode(image_bytes).decode("ascii")
-        return self._request(f"data:image/jpeg;base64,{encoded}", "image")
+        mime = "image/jpeg"
+        if image_bytes.startswith(b"\x89PNG"):
+            mime = "image/png"
+        elif image_bytes.startswith((b"GIF87a", b"GIF89a")):
+            mime = "image/gif"
+        elif image_bytes.startswith(b"RIFF") and b"WEBP" in image_bytes[:16]:
+            mime = "image/webp"
+        return self._request(f"data:{mime};base64,{encoded}", "image")
