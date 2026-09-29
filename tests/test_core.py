@@ -43,3 +43,11 @@ def test_fusion_renormalizes_missing_modalities():
 
 def test_backoff_caps_at_last_delay():
     assert [backoff_seconds(i) for i in range(5)] == [10, 30, 60, 300, 300]
+
+
+def test_remote_response_parser_supports_openai_and_common_shapes():
+    from worker.remote_provider import RemoteEmbeddingProvider
+
+    assert RemoteEmbeddingProvider._read_vector({"data": [{"embedding": [1, 2]}]}) == [1.0, 2.0]
+    assert RemoteEmbeddingProvider._read_vector({"output": {"embeddings": [{"vector": [3]}]}}) == [3.0]
+    assert RemoteEmbeddingProvider._read_vector({"vector": [4]}) == [4.0]
