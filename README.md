@@ -109,7 +109,7 @@ $env:QDRANT_URL = "http://192.168.1.20:6333"
 GitHub Actions 成功后，在仓库的 Actions → CI → Artifacts 下载 `visual-search-plugin`。浏览器下载得到的 ZIP **就是最终 Artifact**，不再包含第二层插件 ZIP；解压一次后应看到：
 
 ```text
-VisualSearch_0.1.0.1/
+VisualSearch_0.1.0.2/
 ├── Jellyfin.Plugin.VisualSearch.dll
 ├── Jellyfin.Plugin.VisualSearch.pdb
 └── meta.json
@@ -125,7 +125,7 @@ docker exec jellyfin sh -lc 'find /config -maxdepth 4 -type d -name plugins -pri
 
 ```bash
 docker stop jellyfin
-rm -rf ~/docker/jellyfin/config/data/plugins/VisualSearch_0.1.0.0
+rm -rf ~/docker/jellyfin/config/data/plugins/VisualSearch_0.1.0.*
 unzip visual-search-plugin.zip -d ~/docker/jellyfin/config/data/plugins/
 docker start jellyfin
 ```
@@ -133,14 +133,14 @@ docker start jellyfin
 重启后日志应出现类似：
 
 ```text
-Loaded plugin: "Visual Search" "0.1.0.1"
+Loaded plugin: "Visual Search" "0.1.0.2"
 ```
 
 **不要**把 `MediaBrowser.*`、`Jellyfin.Data`、`Microsoft.Extensions.*`、`EntityFrameworkCore.*` 等 Jellyfin/ASP.NET 框架 DLL 一起放进插件目录。它们会进入插件自己的 AssemblyLoadContext，可能导致插件实现的 `IPlugin` 与 Jellyfin 主程序中的 `IPlugin` 类型身份不一致，表现为“Loaded assembly”但插件实例没有创建。官方 Jellyfin 插件模板也要求对 Jellyfin 包设置 `ExcludeAssets=runtime`。
 
 ### 4. 配置插件
 
-打开 Dashboard → Plugins → Visual Search。0.1.0.1 起，配置页按 Jellyfin 标准 `pluginConfigurationPage` 结构加载；如果仍看到空白页，先确认日志显示加载的是 `0.1.0.1`，并强制刷新浏览器缓存。
+0.1.0.2 起，Visual Search 与 JS Injector 一样通过 Jellyfin 原生 `EnableInMainMenu` 注册到管理后台左侧栏，日常配置无需先进入较慢的 Plugins 列表页。重启 Jellyfin 并刷新浏览器后，在左侧“插件”区域直接点击 **Visual Search** 即可。配置页仍可通过 Dashboard → Plugins → Visual Search 进入；如果页面异常，先确认日志显示加载的是 `0.1.0.2`，再强制刷新浏览器缓存。
 
 填写：
 
