@@ -5,7 +5,7 @@
 ## 当前 P0 基线
 
 - `src/visual_search_core`：Trickplay tile 坐标、均匀采样、Frame→Video 聚合、缺失模态归一化融合、指纹和退避算法。
-- `worker`：FastAPI Worker API，提供 `/health`、`/embed/text`、`/embed/image`、`/embed/images` 和 Qdrant 写入/检索接口；默认使用确定性的 Mock Provider，也支持通过 `EMBEDDING_PROVIDER=qwen` 启用官方 Qwen3-VL-Embedding-2B。
+- `worker`：FastAPI Worker API，提供 `/health`、`/embed/text`、`/embed/image`、`/embed/images` 和 Qdrant 写入/检索接口；支持 `mock`、本地 `qwen`，以及不需要 GPU 的 `remote` OpenAI-compatible 多模态 Provider。
 - `plugin`：Jellyfin 10.11 插件骨架、自定义 REST API、状态接口和 Web 命名空间。Jellyfin 特定代码集中在 Adapter 层，`JellyfinVersion` 在根目录 `Directory.Build.props` 统一控制。
 - `docker-compose.yml`：可选的快速试运行方式，不是部署前提。生产环境建议直接运行 Qdrant 服务和 Python Worker，避免为了本项目额外引入 Docker 管理负担。
 - `.github/workflows/ci.yml`：Python 核心/Worker 测试和 .NET 9 插件编译，同时只打包插件自身 DLL、PDB 与 `meta.json`，避免把 Jellyfin 框架程序集复制进插件目录。
@@ -95,6 +95,34 @@ Invoke-RestMethod -Method Post -Uri http://127.0.0.1:8099/embed/text -ContentTyp
 ```
 
 健康检查应返回 `status=ready`、模型名称、`dimension=1024` 和 CUDA 设备信息。第一次加载模型较慢，后续请求会复用模型。Worker 关闭时，插件应显示计算节点离线，Qdrant 中已有的向量不会丢失。
+
+### 2A. 改用云端 Embedding（推荐先用小批量验证）
+
+云端模式仍运行一个很轻量的 Worker，但 Worker 不加载本地模型；它只负责把文本/Trickplay 图片转发到你指定的云端多模态 Embedding API，并把向量写入 Qdrant。RTX 2070 可以完全关闭。云端接口必须同时接受文本和图片，并且返回同一个向量空间；只有文本的普通 /v1/embeddings 不能用于本项目的视觉检索。
+
+在 Windows Worker 目录先安装基础依赖（不安装 Torch/Qwen）：
+
+```powershell
+py -3.12 -m venv .venv
+& .\\.venv\\Scripts\\python.exe -m pip install -r requirements.txt
+```
+
+然后用自定义 Base URL、模型名、API Key 启动（API Key 只存在当前 Worker 进程环境变量，不写入 Jellyfin，也不返回到 /health）：
+
+```powershell
+.\\run_remote.ps1 `
+  -BaseUrl "https://你的供应商.example/v1" `
+  -EmbeddingModel "你的多模态嵌入模型" `
+  -ApiKey "你的API_KEY" `
+  -QdrantUrl "http://192.168.1.20:6333" `
+  -Dimension 1024
+```
+
+默认请求为 OpenAI-compatible multimodal 格式：文本使用 input: [{type: "text", text: "..."}]，图片使用 input: [{type: "image_url", image_url: {url: "data:image/jpeg;base64,..."}}]；响应支持标准 data[0].embedding，并兼容常见的 output.embeddings/vector 返回。若供应商只接受纯字符串 input，可加 -Protocol plain，但该模式只有在供应商明确支持图片且仍保证文本/图片同空间时才可用。
+
+先访问 Invoke-RestMethod http://127.0.0.1:8099/health，确认返回 provider=remote、模型名和正确 dimension。然后在 Jellyfin 插件设置中点击“小批量安全测试”：它随机抽取 1～10 个视频，只调用文本和少量 Trickplay 图片嵌入，不写入正式 Qdrant 集合；返回每个视频是否成功、测试帧数和错误信息。这样可以先验证供应商是否接受你的家庭/成人媒体图片、是否返回正确维度，再进行增量或完整索引。
+
+云端供应商拒绝成人图片、返回内容安全错误、超时或维度不一致时，小批量测试会在对应视频的 error 字段显示原因；不要直接启动整库索引。确认测试通过后，再点击“初始化 Qdrant”并执行增量索引。
 
 如果暂时只想测试链路而不下载模型，可以在 PowerShell 中运行 Mock 模式：
 
