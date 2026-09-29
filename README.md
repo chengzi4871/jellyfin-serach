@@ -154,6 +154,8 @@ docker restart jellyfin
 
 ### 4. 配置插件
 
+当前版本已通过 `EnableInMainMenu` 注册到 Jellyfin 管理后台左侧栏，重启并刷新浏览器后可直接点击 **Visual Search**；Dashboard → Plugins → Visual Search 仍保留作为备用入口。
+
 在插件设置中填写 Worker 地址；Qdrant 地址由 Windows Worker 的启动参数配置：
 
 ```text
