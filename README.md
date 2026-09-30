@@ -10,7 +10,7 @@ Jellyfin 插件 ── HTTP/HTTPS ── 云端多模态 Embedding API
        └──────────── HTTP ──── Qdrant（Ubuntu）
 ```
 
-所有运行配置都在 Jellyfin 的 Visual Search 页面填写：Embedding Base URL、模型、API Key、协议、输入格式、向量维度、超时、Qdrant URL 和索引参数。`auto` 输入格式优先发送 `[{"text":"..."}]` 或 `[{"image":"data:..."}]`，遇到 HTTP 400 会依次尝试纯字符串和 OpenAI `type/image_url` 形状；`EmbeddingDimension > 0` 时请求会带 `dimensions`。云端 API 必须让文本和图片处于同一个向量空间；只有纯文本 `/v1/embeddings` 的服务不能用于视觉检索。
+所有运行配置都在 Jellyfin 的 Visual Search 页面填写：Embedding Base URL、模型、API Key、协议、输入格式、向量维度、超时、图片最大尺寸、Qdrant URL、索引权重和调度参数。Docker 中两个地址都不能默认使用 `127.0.0.1`，除非目标服务与 Jellyfin 在同一容器。`auto` 输入格式优先发送 `[{"text":"..."}]` 或 `[{"image":"data:..."}]`，遇到 HTTP 400 会依次尝试纯字符串和 OpenAI `type/image_url` 形状；`EmbeddingDimension > 0` 时请求会带 `dimensions`。云端 API 必须让文本和图片处于同一个向量空间；只有纯文本 `/v1/embeddings` 的服务不能用于视觉检索。
 
 API Key 不会出现在健康检查返回值或普通日志中，但会保存在 Jellyfin 插件配置中，请限制配置目录的访问权限。
 
@@ -51,21 +51,22 @@ docker restart jellyfin
 1. 填写 Embedding Base URL、模型、API Key、维度和 Qdrant URL；Docker 中不要填写 `127.0.0.1`，除非 Qdrant 与 Jellyfin 在同一容器。
 2. 点击“保存并检查连接”。失败时页面会显示失败阶段（cloud 或 qdrant）、HTTP 状态和服务端错误文案。
 3. 点击“初始化 Qdrant”；该操作是幂等的，已存在的集合会直接复用。
-4. 在“语义能力验收”中随机选择一个视频，先检查即将发送的标题与裁切帧；确认后才调用模型，需要更换时重新随机选择。
+4. 在“语义能力验收”中随机选择一个已有 Trickplay 的视频，先检查即将发送的标题与裁切帧；确认后才调用模型，需要更换时重新随机选择。
 5. 确认模型返回向量后手动输入查询词，查看标题和每帧的余弦相似度，再开始增量索引。
+6. 使用“查看索引状态”检查队列进度、等待重试次数、永久失败数、取帧成功/失败数和失败原因分布。
 
 语义能力验收展示实际送入模型的标题和单独视频帧；查询词不预填写，由用户自行输入。测试不会写入正式 Qdrant 集合，也不再提供重复的小批量安全测试入口。
 
 ## 采样、去重和排序
 
-插件从 Jellyfin Trickplay 拼图中裁剪单独帧，不重新解码原视频。采样约按 30 秒覆盖一个时间点，最少 6 帧，最多受 `Frames per video` 限制；短视频少采样，长视频多采样。发送云端前使用低成本 dHash 和颜色差异做近重复过滤，并保留首帧和末帧。
+插件通过 Jellyfin 10.11 的 `ITrickplayManager` 读取 Trickplay 元数据，从拼图中裁剪单独帧，不重新解码原视频。读取时按照库的 `SaveTrickplayWithMedia` 设置优先查找媒体旁目录，并回退查找 Jellyfin 本地目录，避免迁移过程中漏掉数据。语义验收通过 `GetTrickplayItemsAsync` 只从已有 Trickplay 的视频中随机选择。采样约按 30 秒覆盖一个时间点，最少 6 帧，最多受 `Frames per video` 限制；短视频少采样，长视频多采样。发送云端前使用低成本 dHash 和颜色差异做近重复过滤，并保留首帧和末帧。
 
 ```text
 VisualScore = 0.7 × BestFrame + 0.3 × Top3Average
 FinalScore = VisualScore × VisualWeight + TitleScore × TitleWeight
 ```
 
-缺少某一模态时会自动重新归一化。改变权重不需要重新生成向量。
+缺少某一模态时会自动重新归一化。改变权重不需要重新生成向量。取帧失败会记录 `tile_missing`、`tile_read_error` 等原因，并在索引状态中单独统计。
 
 ## API 和兼容性
 
@@ -75,7 +76,10 @@ FinalScore = VisualScore × VisualWeight + TitleScore × TitleWeight
 - `POST /VisualSearch/Index/Ensure`：初始化集合；
 - `POST /VisualSearch/Index/Incremental`：增量索引；
 - `POST /VisualSearch/Index/Rebuild`：完整重建；
+- `POST /VisualSearch/Index/Pause`、`Resume`、`Cancel`：控制索引队列；
 - `POST /VisualSearch/Search`：语义检索。
+
+Embedding 网络错误、超时、429 和 5xx 会进入等待队列并指数退避重试；401、403、404、400 和 413 等配置或请求错误会立即记录为永久失败。定时增量索引默认关闭，启用后按配置周期触发；手动增量索引仍可随时执行。
 
 插件使用独立的 `window.JellyfinVisualSearch` 命名空间和 `/VisualSearch/*` 路由，不修改普通 `/Items` 搜索请求，可以和现有 JS 注入共存。配置页遵循 Jellyfin `data-role="page"` 插件页面结构，兼容 Jellyfin 10.11 Web 客户端和移动端布局。
 
