@@ -40,9 +40,17 @@ public sealed class VisualSearchController : ControllerBase
             var cloud = await _client.GetHealthAsync(cancellationToken).ConfigureAwait(false);
             return Ok(new { status = "ready", cloud, indexedVideos = _state.IndexedVideos });
         }
-        catch (Exception ex) when (ex is HttpRequestException or TaskCanceledException)
+        catch (VisualSearchHealthException ex)
         {
-            return StatusCode(503, new { status = "offline", message = "cloud embedding API or Qdrant is offline" });
+            return StatusCode(ex.StatusCode, new { status = "error", stage = ex.Stage, message = ex.Message });
+        }
+        catch (TaskCanceledException ex)
+        {
+            return StatusCode(504, new { status = "timeout", stage = "cloud", message = ex.Message });
+        }
+        catch (Exception ex)
+        {
+            return StatusCode(500, new { status = "error", stage = "unknown", message = ex.Message });
         }
     }
 
@@ -119,8 +127,23 @@ public sealed class VisualSearchController : ControllerBase
     [HttpPost("Index/Ensure")]
     public async Task<IActionResult> Ensure(CancellationToken cancellationToken)
     {
-        await _client.EnsureCollectionsAsync(cancellationToken).ConfigureAwait(false);
-        return Ok(new { status = "ready" });
+        try
+        {
+            await _client.EnsureCollectionsAsync(cancellationToken).ConfigureAwait(false);
+            return Ok(new { status = "ready" });
+        }
+        catch (InvalidOperationException ex)
+        {
+            return BadRequest(new { status = "error", stage = "qdrant", message = ex.Message });
+        }
+        catch (TaskCanceledException ex)
+        {
+            return StatusCode(504, new { status = "timeout", stage = "qdrant", message = ex.Message });
+        }
+        catch (HttpRequestException ex)
+        {
+            return StatusCode(503, new { status = "error", stage = "qdrant", message = ex.Message });
+        }
     }
 
     [HttpPost("Index/Rebuild")]
@@ -193,7 +216,6 @@ public sealed class VisualSearchController : ControllerBase
         var count = Math.Clamp(request?.Count ?? 3, 1, 10);
         var frames = Math.Clamp(request?.FramesPerVideo ?? 3, 1, 8);
         var queries = (request?.Queries ?? Array.Empty<string>()).Where(x => !string.IsNullOrWhiteSpace(x)).Select(x => x.Trim()).Distinct(StringComparer.OrdinalIgnoreCase).Take(20).ToArray();
-        if (queries.Length == 0) return BadRequest("at least one query is required");
         var videos = new List<MediaBrowser.Controller.Entities.Video>();
         foreach (var rawId in request?.ItemIds ?? Array.Empty<string>())
         {
@@ -215,6 +237,22 @@ public sealed class VisualSearchController : ControllerBase
         return Ok(new { status = "completed", count = results.Count, queries, results });
     }
 
+    /// <summary>Chooses one video and extracts the exact title and cropped Trickplay frames without calling the cloud model.</summary>
+    [HttpPost("Test/Preview")]
+    public async Task<ActionResult> Preview([FromBody] PreviewRequest? request, CancellationToken cancellationToken)
+    {
+        MediaBrowser.Controller.Entities.Video? video = null;
+        if (Guid.TryParse(request?.ItemId, out var requestedId))
+            video = _libraryManager.GetItemById<MediaBrowser.Controller.Entities.Video>(requestedId);
+        video ??= _libraryManager.GetItemList(new MediaBrowser.Controller.Entities.InternalItemsQuery
+        {
+            MediaTypes = new[] { Jellyfin.Data.Enums.MediaType.Video }, IsVirtualItem = false, IsFolder = false, Recursive = true
+        }).OfType<MediaBrowser.Controller.Entities.Video>().OrderBy(_ => Guid.NewGuid()).FirstOrDefault();
+        if (video is null) return NotFound("No video is available for semantic acceptance");
+        var frames = Math.Clamp(request?.FramesPerVideo ?? 3, 1, 8);
+        return Ok(await _indexer.PreviewAsync(video, frames, cancellationToken).ConfigureAwait(false));
+    }
+
     private Guid GetUserId()
     {
         var claim = User.FindFirst("Jellyfin-UserId")?.Value ?? User.FindFirst(ClaimTypes.NameIdentifier)?.Value;
@@ -226,6 +264,7 @@ public sealed record SearchRequest(string Query, string[]? LibraryIds = null, in
 public sealed record IndexItemRequest(string ItemId, string? LibraryId = null);
 public sealed record RandomTestRequest(int Count = 3, int FramesPerVideo = 2);
 public sealed record InspectRequest(int Count = 3, int FramesPerVideo = 3, string[]? Queries = null, string[]? ItemIds = null);
+public sealed record PreviewRequest(string? ItemId = null, int FramesPerVideo = 3);
 public sealed record SearchResponse(string Query, SearchResult[] Results, long ElapsedMs);
 public sealed record SearchResult(string ItemId, string Title, double Score, double? VisualScore, double? TitleScore, BestFrame? BestFrame);
 public sealed record BestFrame(int FrameIndex, long TimestampMs, double Score);
