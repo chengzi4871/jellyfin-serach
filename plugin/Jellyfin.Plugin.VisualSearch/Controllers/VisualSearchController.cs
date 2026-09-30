@@ -131,7 +131,13 @@ public sealed class VisualSearchController : ControllerBase
             var visualHits = NormalizeHits(frameHits);
             var titleScores = titleHits.GroupBy(x => x.Hit.ItemId).ToDictionary(x => x.Key, x => x.Max(y => y.NormalizedScore));
             var frameGroups = visualHits.GroupBy(x => x.Hit.ItemId).ToDictionary(x => x.Key, x => x.OrderByDescending(y => y.NormalizedScore).ToList());
-            var candidates = titleScores.Keys.Concat(frameGroups.Keys).Distinct().Select(itemId =>
+            IEnumerable<string> candidateIds = preset.Mode.ToLowerInvariant() switch
+            {
+                "title" => titleScores.Keys,
+                "visual" => frameGroups.Keys,
+                _ => titleScores.Keys.Concat(frameGroups.Keys).Distinct()
+            };
+            var candidates = candidateIds.Select(itemId =>
             {
                 frameGroups.TryGetValue(itemId, out var frames);
                 titleScores.TryGetValue(itemId, out var titleScore);
@@ -162,7 +168,10 @@ public sealed class VisualSearchController : ControllerBase
                 // Passing the authenticated user id makes Jellyfin perform its normal access filtering.
                 var item = _libraryManager.GetItemById<MediaBrowser.Controller.Entities.Video>(id, userId);
                 if (item is null) return null;
-                return new SearchResult(hit.itemId, item.Name, hit.final, hit.visualScore, hit.title, hit.frame)
+                var visualForResult = string.Equals(preset.Mode, "title", StringComparison.OrdinalIgnoreCase) ? null : hit.visualScore;
+                var titleForResult = string.Equals(preset.Mode, "visual", StringComparison.OrdinalIgnoreCase) ? null : hit.title;
+                var frameForResult = string.Equals(preset.Mode, "title", StringComparison.OrdinalIgnoreCase) ? null : hit.frame;
+                return new SearchResult(hit.itemId, item.Name, hit.final, visualForResult, titleForResult, frameForResult)
                 {
                     RunTimeTicks = item.RunTimeTicks,
                     Type = "Video",
