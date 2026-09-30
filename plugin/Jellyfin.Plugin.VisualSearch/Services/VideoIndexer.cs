@@ -32,27 +32,40 @@ public sealed class VideoIndexer
 
     public async Task<(bool Text, int Frames)> IndexAsync(Video video, string libraryId, CancellationToken cancellationToken)
     {
-        var text = $"Title: {video.Name}\nOriginal title: {video.OriginalTitle}\nFilename: {Path.GetFileName(video.Path)}";
+        var configuration = Plugin.Instance?.Configuration ?? new PluginConfiguration();
+        var text = BuildTitleText(video);
+        _state.SetStage("embedding_title", 0, 1, 1);
+        _state.PlanEmbeddingInputs(1);
+        var titleVector = await _client.EmbedTextAsync(text, cancellationToken).ConfigureAwait(false);
         await _client.UpsertAsync("jellyfin_video_text", new[]
         {
-            new { id = video.Id.ToString(), vector = await _client.EmbedTextAsync(text, cancellationToken), payload = new { itemId = video.Id.ToString(), libraryId, textHash = text.GetHashCode().ToString() } }
+            new { id = video.Id.ToString(), vector = titleVector, payload = new { itemId = video.Id.ToString(), libraryId, textHash = text.GetHashCode().ToString() } }
         }, cancellationToken).ConfigureAwait(false);
+        _state.RecordEmbeddingInputs(1);
 
-        var frames = new List<object>();
+        _state.SetStage("reading_frames", 0, 0, 0);
+        var frameSamples = new List<(FrameSample Sample, int Interval)>();
         var frameFailureReasons = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
         var manifest = await _trickplay.GetTrickplayManifest(video).ConfigureAwait(false);
         foreach (var mediaSource in manifest.Values)
         {
             if (mediaSource.Count == 0) continue;
             var info = mediaSource.OrderBy(x => x.Key).First().Value;
-            var read = await ReadDistinctFramesAsync(video, info, Plugin.Instance?.Configuration.FramesPerVideo ?? 12, cancellationToken).ConfigureAwait(false);
-            var samples = read.Samples;
+            var read = await ReadDistinctFramesAsync(video, info, configuration.GetEffectiveMaxFramesPerVideo(), cancellationToken).ConfigureAwait(false);
             foreach (var reason in read.FailureReasons) frameFailureReasons[reason.Key] = frameFailureReasons.TryGetValue(reason.Key, out var old) ? old + reason.Value : reason.Value;
-            foreach (var sample in samples)
-            {
-                var vector = await _client.EmbedImageAsync(sample.Bytes, cancellationToken).ConfigureAwait(false);
-                frames.Add(new { id = DeterministicId(video.Id, sample.FrameIndex), vector, payload = new { itemId = video.Id.ToString(), libraryId, frameIndex = sample.FrameIndex, timestampMs = (long)sample.FrameIndex * info.Interval } });
-            }
+            frameSamples.AddRange(read.Samples.Select(sample => (sample, info.Interval)));
+        }
+
+        var images = frameSamples.Select(x => x.Sample.Bytes).ToArray();
+        var frames = new List<object>(images.Length);
+        var totalBatches = images.Length == 0 ? 0 : (int)Math.Ceiling(images.Length / (double)Math.Clamp(configuration.EmbeddingBatchSize, 1, 256));
+        _state.SetStage("embedding_frames", 0, totalBatches, images.Length);
+        _state.PlanEmbeddingInputs(images.Length);
+        var imageVectors = await _client.EmbedImagesAsync(images, cancellationToken, (batch, total, count) => _state.SetBatchProgress(batch, total, count)).ConfigureAwait(false);
+        for (var i = 0; i < frameSamples.Count; i++)
+        {
+            var sample = frameSamples[i].Sample;
+            frames.Add(new { id = DeterministicId(video.Id, sample.FrameIndex), vector = imageVectors[i], payload = new { itemId = video.Id.ToString(), libraryId, frameIndex = sample.FrameIndex, timestampMs = (long)sample.FrameIndex * frameSamples[i].Interval } });
         }
         if (frames.Count > 0) await _client.UpsertAsync("jellyfin_video_frames", frames, cancellationToken).ConfigureAwait(false);
         if (frames.Count > 0) _state.RecordFrameSuccess(frames.Count);
@@ -64,12 +77,16 @@ public sealed class VideoIndexer
             foreach (var reason in frameFailureReasons.Where(x => !string.Equals(x.Key, primaryReason, StringComparison.OrdinalIgnoreCase)))
                 _state.FrameFailureReasons.AddOrUpdate(reason.Key, reason.Value, (_, old) => old + reason.Value);
         }
+        _state.SetStage("video_completed", 0, 0, 0);
         return (true, frames.Count);
     }
 
+    private static string BuildTitleText(Video video)
+        => $"Title: {video.Name}\nOriginal title: {video.OriginalTitle}\nFilename: {Path.GetFileName(video.Path)}";
+
     public async Task<EmbeddingProbeResult> ProbeAsync(Video video, int maxFrames, CancellationToken cancellationToken)
     {
-        var text = $"Title: {video.Name}\nOriginal title: {video.OriginalTitle}\nFilename: {Path.GetFileName(video.Path)}";
+        var text = BuildTitleText(video);
         await _client.EmbedTextAsync(text, cancellationToken).ConfigureAwait(false);
         var framesTested = 0;
         var manifest = await _trickplay.GetTrickplayManifest(video).ConfigureAwait(false);
@@ -78,11 +95,8 @@ public sealed class VideoIndexer
             if (mediaSource.Count == 0) continue;
             var info = mediaSource.OrderBy(x => x.Key).First().Value;
             var samples = (await ReadDistinctFramesAsync(video, info, Math.Max(1, maxFrames), cancellationToken).ConfigureAwait(false)).Samples;
-            foreach (var sample in samples)
-            {
-                await _client.EmbedImageAsync(sample.Bytes, cancellationToken).ConfigureAwait(false);
-                framesTested++;
-            }
+            await _client.EmbedImagesAsync(samples.Select(x => x.Bytes).ToArray(), cancellationToken).ConfigureAwait(false);
+            framesTested = samples.Count;
             break;
         }
         return new EmbeddingProbeResult(video.Id.ToString(), video.Name, true, framesTested, null);
@@ -90,11 +104,12 @@ public sealed class VideoIndexer
 
     public async Task<DetailedProbeResult> ProbeDetailedAsync(Video video, int maxFrames, string[] queries, CancellationToken cancellationToken)
     {
-        var titleText = $"Title: {video.Name}\nOriginal title: {video.OriginalTitle}\nFilename: {Path.GetFileName(video.Path)}";
+        var titleText = BuildTitleText(video);
         var titleVector = await _client.EmbedTextAsync(titleText, cancellationToken).ConfigureAwait(false);
+        var queryList = queries.Where(x => !string.IsNullOrWhiteSpace(x)).Select(x => x.Trim()).Take(20).ToArray();
         var queryVectors = new Dictionary<string, float[]>();
-        foreach (var query in queries.Where(x => !string.IsNullOrWhiteSpace(x)).Take(20))
-            queryVectors[query] = await _client.EmbedTextAsync(query.Trim(), cancellationToken).ConfigureAwait(false);
+        var vectors = await _client.EmbedTextsAsync(queryList, cancellationToken).ConfigureAwait(false);
+        for (var i = 0; i < queryList.Length; i++) queryVectors[queryList[i]] = vectors[i];
 
         var frames = new List<ProbeFrame>();
         var manifest = await _trickplay.GetTrickplayManifest(video).ConfigureAwait(false);
@@ -103,13 +118,13 @@ public sealed class VideoIndexer
             if (mediaSource.Count == 0) continue;
             var info = mediaSource.OrderBy(x => x.Key).First().Value;
             var samples = (await ReadDistinctFramesAsync(video, info, Math.Max(1, maxFrames), cancellationToken).ConfigureAwait(false)).Samples;
-            foreach (var sample in samples)
+            var imageVectors = await _client.EmbedImagesAsync(samples.Select(x => x.Bytes).ToArray(), cancellationToken).ConfigureAwait(false);
+            for (var i = 0; i < samples.Count; i++)
             {
-                var frame = sample.FrameIndex;
-                var frameBytes = sample.Bytes;
-                var vector = await _client.EmbedImageAsync(frameBytes, cancellationToken).ConfigureAwait(false);
+                var frame = samples[i].FrameIndex;
+                var vector = imageVectors[i];
                 var scores = queryVectors.ToDictionary(x => x.Key, x => Cosine(x.Value, vector));
-                frames.Add(new ProbeFrame(frame, (long)frame * info.Interval, $"data:image/jpeg;base64,{Convert.ToBase64String(frameBytes)}", VectorSummary.From(vector), scores));
+                frames.Add(new ProbeFrame(frame, (long)frame * info.Interval, $"data:image/jpeg;base64,{Convert.ToBase64String(samples[i].Bytes)}", VectorSummary.From(vector), scores));
             }
             break;
         }
@@ -179,7 +194,7 @@ public sealed class VideoIndexer
                 failures["tile_read_error"] = failures.TryGetValue("tile_read_error", out var readError) ? readError + 1 : 1;
                 continue;
             }
-            if (frame != indices[0] && frame != indices[^1] && kept.Any(x => IsNearDuplicate(x.Bytes, bytes))) continue;
+            if (Plugin.Instance?.Configuration.FrameDeduplicationEnabled != false && frame != indices[0] && frame != indices[^1] && kept.Any(x => IsNearDuplicate(x.Bytes, bytes))) continue;
             kept.Add(new FrameSample(frame, bytes));
         }
         return new FrameReadResult(kept, failures);
