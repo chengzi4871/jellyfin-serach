@@ -84,6 +84,9 @@ public sealed class IndexCoordinator
             _pendingRebuild = false;
             _run?.Cancel();
             _state.Status = "cancelled";
+            _state.Stage = "cancelled";
+            _state.QueueWaiting = 0;
+            _state.NextRetryAt = null;
             _state.Paused = false;
         }
     }
@@ -92,6 +95,7 @@ public sealed class IndexCoordinator
     {
         _state.Paused = true;
         _state.Status = "paused";
+        _state.Stage = "paused";
     }
 
     public void Resume()
@@ -177,19 +181,24 @@ public sealed class IndexCoordinator
                 await _indexer.IndexAsync(video, string.Empty, cancellationToken).ConfigureAwait(false);
                 _state.RecordError(string.Empty);
                 _state.QueueWaiting = 0;
+                _state.CurrentRetryAttempt = 0;
+                _state.NextRetryAt = null;
                 return true;
             }
             catch (Exception ex) when (VisualSearchClient.IsRetryable(ex))
             {
                 attempt++;
                 _state.RetryCount++;
+                _state.CurrentRetryAttempt = attempt;
                 _state.QueueWaiting = 1;
                 _state.Status = "waiting_retry";
                 _state.Stage = "waiting_retry";
                 _state.RecordError($"{video.Name}: retry {attempt}; {ex.Message}");
                 var delay = TimeSpan.FromSeconds(Math.Min(300, retryDelay * Math.Pow(2, Math.Min(attempt - 1, 5))));
+                _state.NextRetryAt = DateTime.UtcNow + delay;
                 await Task.Delay(delay, cancellationToken).ConfigureAwait(false);
                 _state.QueueWaiting = 0;
+                _state.NextRetryAt = null;
                 if (_scheduledRun) await WaitForScheduleWindowAsync(cancellationToken).ConfigureAwait(false);
                 await WaitIfPausedAsync(cancellationToken).ConfigureAwait(false);
             }
