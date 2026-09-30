@@ -19,14 +19,20 @@ public sealed class IndexHtmlScriptMiddleware
 
     public async Task InvokeAsync(HttpContext context)
     {
-        if (!HttpMethods.IsGet(context.Request.Method) || !IsIndex(context.Request.Path.Value)
-            || context.Request.Headers.ContainsKey(HeaderNames.IfNoneMatch)
-            || context.Request.Headers.ContainsKey(HeaderNames.IfModifiedSince))
+        if (!HttpMethods.IsGet(context.Request.Method) || !IsIndex(context.Request.Path.Value))
         {
-            // Conditional requests must flow through unchanged so a 304 never gets a body.
             await _next(context).ConfigureAwait(false);
             return;
         }
+
+        // A WebView can keep an old index.html from before the plugin was
+        // installed. If its conditional request is allowed through unchanged,
+        // the server returns 304 and the old document never receives the
+        // plugin script. Force a fresh 200 only for the two HTML entry paths;
+        // the response handling below still refuses to write bodies for any
+        // 304/204 produced by downstream middleware.
+        context.Request.Headers.Remove(HeaderNames.IfNoneMatch);
+        context.Request.Headers.Remove(HeaderNames.IfModifiedSince);
         context.Request.Headers.Remove(HeaderNames.AcceptEncoding);
         var original = context.Response.Body;
         await using var buffer = new MemoryStream();
