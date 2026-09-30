@@ -6,7 +6,7 @@
     var API = window.JellyfinVisualSearch = window.JellyfinVisualSearch || {};
     if (API.initialized) return;
     API.search = function (query, libraryIds, limit) {
-        return ApiClient.ajax({ type: 'POST', url: ApiClient.getUrl('VisualSearch/Search'), data: JSON.stringify({ query: query, libraryIds: libraryIds || [], limit: limit || 30 }), contentType: 'application/json' });
+        return ApiClient.ajax({ type: 'POST', url: ApiClient.getUrl('VisualSearch/Search'), data: JSON.stringify({ query: query, libraryIds: libraryIds || [], limit: limit || 30 }), contentType: 'application/json', dataType: 'json' });
     };
     API.health = function () { return ApiClient.getJSON(ApiClient.getUrl('VisualSearch/Health')); };
     API.initialized = true;
@@ -25,9 +25,17 @@
         return object[name] != null ? object[name] : object[lower];
     }
 
-    function errorMessage(error) {
-        var body = error && (error.responseJSON || (error.response && error.response.data) || error.data);
-        return prop(body, 'Message') || prop(body, 'Error') || (error && error.message) || String(error);
+    async function errorMessage(error) {
+        if (error && typeof error.text === 'function' && typeof error.status === 'number') {
+            var raw = '';
+            try { raw = await error.text(); } catch (_) { }
+            var body = null;
+            try { body = raw ? JSON.parse(raw) : null; } catch (_) { }
+            var detail = prop(body, 'Message') || prop(body, 'Error') || raw || error.statusText || '请求失败';
+            return 'HTTP ' + error.status + '：' + detail;
+        }
+        var legacyBody = error && (error.responseJSON || (error.response && error.response.data) || error.data);
+        return prop(legacyBody, 'Message') || prop(legacyBody, 'Error') || (error && error.message) || String(error);
     }
 
     function ensureStyle() {
@@ -70,7 +78,7 @@
             if (!value) { status.textContent = '请输入搜索内容'; query.focus(); return; }
             var button = panel.querySelector('[data-jf-vs-search]'); button.disabled = true; status.textContent = ' 搜索中…';
             try { var data = await API.search(value, [], 30); var results = prop(data, 'Results') || []; status.textContent = ' 共 ' + (Array.isArray(results) ? results.length : 0) + ' 个结果'; renderResults(panel.querySelector('[data-jf-vs-results]'), data); }
-            catch (e) { status.textContent = ' 搜索失败：' + errorMessage(e); }
+            catch (e) { status.textContent = ' 搜索失败：' + await errorMessage(e); }
             finally { button.disabled = false; }
         };
         panel.querySelector('[data-jf-vs-search]').onclick = run;
