@@ -89,7 +89,10 @@ public static class SearchPresets
         => item.TryGetProperty(name, out var value) && value.ValueKind == JsonValueKind.String && !string.IsNullOrWhiteSpace(value.GetString()) ? value.GetString()!.Trim() : fallback;
 
     private static double ReadDouble(JsonElement item, string name, double fallback)
-        => item.TryGetProperty(name, out var value) && value.TryGetDouble() && double.IsFinite(value.GetDouble()) ? value.GetDouble() : fallback;
+    {
+        if (!item.TryGetProperty(name, out var value) || !value.TryGetDouble(out var number) || !double.IsFinite(number)) return fallback;
+        return number;
+    }
 
     private static bool ReadBool(JsonElement item, string name, bool fallback)
         => item.TryGetProperty(name, out var value) && (value.ValueKind is JsonValueKind.True or JsonValueKind.False) ? value.GetBoolean() : fallback;

@@ -162,7 +162,7 @@ public sealed class VisualSearchController : ControllerBase
                 // Passing the authenticated user id makes Jellyfin perform its normal access filtering.
                 var item = _libraryManager.GetItemById<MediaBrowser.Controller.Entities.Video>(id, userId);
                 if (item is null) return null;
-                return new SearchResult(hit.itemId, item.Name, hit.final, hit.visual, hit.title, hit.frame)
+                return new SearchResult(hit.itemId, item.Name, hit.final, hit.visualScore, hit.title, hit.frame)
                 {
                     RunTimeTicks = item.RunTimeTicks,
                     Type = "Video",
