@@ -23,6 +23,10 @@ namespace Jellyfin.Plugin.VisualSearch;
 public sealed class VisualSearchClient
 {
     private readonly HttpClient _http;
+    private readonly object _queryCacheGate = new();
+    private readonly Dictionary<string, QueryCacheEntry> _queryCache = new(StringComparer.Ordinal);
+    private const int QueryCacheCapacity = 256;
+    private static readonly TimeSpan QueryCacheLifetime = TimeSpan.FromMinutes(10);
 
     public VisualSearchClient(HttpClient http) => _http = http;
 
@@ -55,6 +59,39 @@ public sealed class VisualSearchClient
 
     public Task<float[]> EmbedTextAsync(string text, CancellationToken cancellationToken)
         => EmbedSingleAsync(text, "text", cancellationToken);
+
+    /// <summary>Embeds a user query with a short bounded cache to avoid duplicate remote calls.</summary>
+    public async Task<float[]> EmbedQueryTextAsync(string text, CancellationToken cancellationToken)
+    {
+        var normalized = NormalizeQuery(text);
+        var config = GetConfig();
+        var key = string.Join("\u001f", config.EmbeddingBaseUrl, config.EmbeddingModel, config.EmbeddingProtocol, config.EmbeddingInputShape, config.EmbeddingDimension, normalized);
+        lock (_queryCacheGate)
+        {
+            if (_queryCache.TryGetValue(key, out var cached) && DateTime.UtcNow - cached.CreatedAt < QueryCacheLifetime)
+            {
+                cached.LastAccessAt = DateTime.UtcNow;
+                return cached.Vector;
+            }
+            _queryCache.Remove(key);
+        }
+
+        var vector = await EmbedTextAsync(normalized, cancellationToken).ConfigureAwait(false);
+        lock (_queryCacheGate)
+        {
+            var now = DateTime.UtcNow;
+            _queryCache[key] = new QueryCacheEntry(vector, now, now);
+            while (_queryCache.Count > QueryCacheCapacity)
+            {
+                var oldest = _queryCache.OrderBy(x => x.Value.LastAccessAt).First().Key;
+                _queryCache.Remove(oldest);
+            }
+        }
+        return vector;
+    }
+
+    private static string NormalizeQuery(string text)
+        => string.Join(' ', (text ?? string.Empty).Normalize(NormalizationForm.FormC).Split((char[]?)null, StringSplitOptions.RemoveEmptyEntries));
 
     public async Task<IReadOnlyList<float[]>> EmbedTextsAsync(IReadOnlyList<string> texts, CancellationToken cancellationToken, Action<int, int, int>? batchProgress = null)
     {
@@ -247,10 +284,23 @@ public sealed class VisualSearchClient
             && size.TryGetInt32(out dimension);
     }
 
-    public async Task<IReadOnlyList<RemoteSearchHit>> SearchAsync(float[] vector, string collection, int limit, CancellationToken cancellationToken)
+    public async Task<IReadOnlyList<RemoteSearchHit>> SearchAsync(float[] vector, string collection, int limit, CancellationToken cancellationToken, IReadOnlyList<string>? libraryIds = null)
     {
         var config = GetConfig();
-        using var response = await _http.PostAsJsonAsync(GetQdrantUrl(config) + "/collections/" + Uri.EscapeDataString(collection) + "/points/search", new { vector, limit, with_payload = true }, cancellationToken).ConfigureAwait(false);
+        var ids = libraryIds?.Where(x => !string.IsNullOrWhiteSpace(x)).Select(x => x.Trim()).Distinct(StringComparer.OrdinalIgnoreCase).ToArray() ?? Array.Empty<string>();
+        object body = ids.Length == 0
+            ? new { vector, limit, with_payload = true }
+            : new
+            {
+                vector,
+                limit,
+                with_payload = true,
+                filter = new
+                {
+                    should = ids.Select(id => (object)new { key = "libraryId", match = new { value = id } }).ToArray()
+                }
+            };
+        using var response = await _http.PostAsJsonAsync(GetQdrantUrl(config) + "/collections/" + Uri.EscapeDataString(collection) + "/points/search", body, cancellationToken).ConfigureAwait(false);
         await EnsureSuccessWithDetailsAsync(response, $"Qdrant search ({collection})").ConfigureAwait(false);
         using var document = JsonDocument.Parse(await response.Content.ReadAsStreamAsync(cancellationToken).ConfigureAwait(false));
         var hits = new List<RemoteSearchHit>();
@@ -376,6 +426,19 @@ public sealed record WorkerHealth
     public string Device { get; init; } = "cloud";
 }
 public sealed record RemoteSearchHit(string ItemId, double Score, JsonElement Payload);
+internal sealed class QueryCacheEntry
+{
+    public QueryCacheEntry(float[] vector, DateTime createdAt, DateTime lastAccessAt)
+    {
+        Vector = vector;
+        CreatedAt = createdAt;
+        LastAccessAt = lastAccessAt;
+    }
+
+    public float[] Vector { get; }
+    public DateTime CreatedAt { get; }
+    public DateTime LastAccessAt { get; set; }
+}
 public sealed class VisualSearchHealthException : Exception
 {
     public VisualSearchHealthException(string stage, string message, Exception? innerException, int statusCode)
