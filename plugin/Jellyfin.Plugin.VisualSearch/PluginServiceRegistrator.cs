@@ -103,6 +103,7 @@ public sealed class VisualSearchState
 public sealed class IndexScheduleService : BackgroundService
 {
     private readonly IndexCoordinator _coordinator;
+    private string? _lastTriggeredWindow;
 
     public IndexScheduleService(IndexCoordinator coordinator) => _coordinator = coordinator;
 
@@ -110,10 +111,31 @@ public sealed class IndexScheduleService : BackgroundService
     {
         while (!stoppingToken.IsCancellationRequested)
         {
-            var minutes = Math.Clamp(Plugin.Instance?.Configuration.ScheduledIndexIntervalMinutes ?? 360, 5, 10080);
-            await Task.Delay(TimeSpan.FromMinutes(minutes), stoppingToken).ConfigureAwait(false);
-            if (stoppingToken.IsCancellationRequested) break;
-            if (Plugin.Instance?.Configuration.ScheduledIndexEnabled == true) _coordinator.Start();
+            var configuration = Plugin.Instance?.Configuration;
+            if (configuration?.ScheduledIndexEnabled == true)
+            {
+                var windows = IndexSchedule.Parse(configuration.ScheduledIndexWindows);
+                var active = IndexSchedule.FindActive(DateTime.Now, windows);
+                if (active is { } current)
+                {
+                    var key = $"{current.StartAt:yyyyMMddHHmm}-{current.Window.Key}";
+                    if (!string.Equals(_lastTriggeredWindow, key, StringComparison.Ordinal))
+                    {
+                        _lastTriggeredWindow = key;
+                        _coordinator.StartScheduled();
+                    }
+                }
+                else
+                {
+                    _lastTriggeredWindow = null;
+                }
+            }
+            else
+            {
+                _lastTriggeredWindow = null;
+            }
+
+            await Task.Delay(TimeSpan.FromSeconds(20), stoppingToken).ConfigureAwait(false);
         }
     }
 }
