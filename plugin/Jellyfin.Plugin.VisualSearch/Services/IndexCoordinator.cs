@@ -161,7 +161,7 @@ public sealed class IndexCoordinator
                 _state.FailedVideos++;
                 _state.PermanentFailures++;
                 _state.RecordError($"{video.Name}: {ex.Message}");
-                _state.FailureReasons.AddOrUpdate("index_permanent_error", 1, (_, old) => old + 1);
+                _state.QueueFailureReasons.AddOrUpdate("index_permanent_error", 1, (_, old) => old + 1);
                 return false;
             }
         }
