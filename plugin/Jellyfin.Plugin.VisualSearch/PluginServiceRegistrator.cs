@@ -119,10 +119,10 @@ public sealed class IndexScheduleService : BackgroundService
                 if (active is { } current)
                 {
                     var key = $"{current.StartAt:yyyyMMddHHmm}-{current.Window.Key}";
-                    if (!string.Equals(_lastTriggeredWindow, key, StringComparison.Ordinal))
+                    if (!string.Equals(_lastTriggeredWindow, key, StringComparison.Ordinal)
+                        && _coordinator.StartScheduled())
                     {
                         _lastTriggeredWindow = key;
-                        _coordinator.StartScheduled();
                     }
                 }
                 else
