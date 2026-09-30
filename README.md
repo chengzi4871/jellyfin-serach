@@ -10,7 +10,7 @@ Jellyfin 插件 ── HTTP/HTTPS ── 云端多模态 Embedding API
        └──────────── HTTP ──── Qdrant（Ubuntu）
 ```
 
-所有运行配置都在 Jellyfin 的 Visual Search 页面填写：Embedding Base URL、模型、API Key、协议、输入格式、向量维度、超时、图片最大尺寸、Qdrant URL、索引权重和调度参数。定时增量索引使用“星期 + 时段表”，例如 `周一 02:00-06:00;22:00-23:30`，每行一个星期；时段外发现的新视频或变更会等待下一个时段，手动索引不受限制。Docker 中两个地址都不能默认使用 `127.0.0.1`，除非目标服务与 Jellyfin 在同一容器。`auto` 输入格式优先发送 `[{"text":"..."}]` 或 `[{"image":"data:..."}]`，遇到 HTTP 400 会依次尝试纯字符串和 OpenAI `type/image_url` 形状；`EmbeddingDimension > 0` 时请求会带 `dimensions`。云端 API 必须让文本和图片处于同一个向量空间；只有纯文本 `/v1/embeddings` 的服务不能用于视觉检索。
+所有运行配置都在 Jellyfin 的 Visual Search 页面填写：Embedding Base URL、模型、API Key、协议、输入格式、向量维度、超时、图片最大尺寸、Embedding batch size、Qdrant URL、索引权重和调度参数。batch size 默认 32，表示一次 HTTP Embedding 请求最多发送多少个文本或图片输入。定时增量索引使用“星期 + 时段表”，例如 `周一 02:00-06:00;22:00-23:30`，每行一个星期；时段外发现的新视频或变更会等待下一个时段，手动索引不受限制。Docker 中两个地址都不能默认使用 `127.0.0.1`，除非目标服务与 Jellyfin 在同一容器。`auto` 输入格式优先发送 `[{"text":"..."}]` 或 `[{"image":"data:..."}]`，遇到 HTTP 400 会依次尝试纯字符串和 OpenAI `type/image_url` 形状；`EmbeddingDimension > 0` 时请求会带 `dimensions`。云端 API 必须让文本和图片处于同一个向量空间；只有纯文本 `/v1/embeddings` 的服务不能用于视觉检索。
 
 API Key 不会出现在健康检查返回值或普通日志中，但会保存在 Jellyfin 插件配置中，请限制配置目录的访问权限。
 
@@ -59,7 +59,9 @@ docker restart jellyfin
 
 ## 采样、去重和排序
 
-插件通过 Jellyfin 10.11 的 `ITrickplayManager` 读取 Trickplay 元数据，从拼图中裁剪单独帧，不重新解码原视频。读取时按照库的 `SaveTrickplayWithMedia` 设置优先查找媒体旁目录，并回退查找 Jellyfin 本地目录，避免迁移过程中漏掉数据。语义验收通过 `GetTrickplayItemsAsync` 只从已有 Trickplay 的视频中随机选择。采样约按 30 秒覆盖一个时间点，最少 6 帧，最多受 `Frames per video` 限制；短视频少采样，长视频多采样。发送云端前使用低成本 dHash 和颜色差异做近重复过滤，并保留首帧和末帧。
+插件通过 Jellyfin 10.11 的 `ITrickplayManager` 读取 Trickplay 元数据，从拼图中裁剪单独帧，不重新解码原视频。读取时按照库的 `SaveTrickplayWithMedia` 设置优先查找媒体旁目录，并回退查找 Jellyfin 本地目录，避免迁移过程中漏掉数据。语义验收通过 `GetTrickplayItemsAsync` 只从已有 Trickplay 的视频中随机选择。采样约按 30 秒覆盖一个时间点，最少 6 帧，长视频会自然增加采样点；`单视频最大截图量` 只是硬上限，不再表示固定采样数。发送云端前可用配置开关启用低成本 dHash 和颜色差异近重复过滤，并保留首帧和末帧。
+
+索引状态页每 3 秒刷新一次，显示运行类型、阶段、视频总进度、当前视频、当前帧、Embedding 批次、已完成输入、请求数、处理速度、预计剩余时间、自动重试和永久失败数量；取帧失败原因也会按类别汇总。
 
 ```text
 VisualScore = 0.7 × BestFrame + 0.3 × Top3Average
