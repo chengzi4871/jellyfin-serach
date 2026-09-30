@@ -40,6 +40,24 @@ public sealed class PluginServiceRegistrator : IPluginServiceRegistrator
 public sealed class VisualSearchState
 {
     public string Status { get; set; } = "not_started";
+    public string RunType { get; set; } = "none";
+    public string Stage { get; set; } = "idle";
+    public long CurrentVideoIndex { get; set; }
+    public long CurrentVideoTotal { get; set; }
+    public string? CurrentVideoTitle { get; set; }
+    public long CurrentFrameCompleted { get; set; }
+    public long CurrentFrameTotal { get; set; }
+    public long CurrentBatchIndex { get; set; }
+    public long CurrentBatchTotal { get; set; }
+    public long CurrentBatchItems { get; set; }
+    public long EmbeddingRequests { get; set; }
+    public long EmbeddingInputsCompleted { get; set; }
+    public long EmbeddingInputsTotal { get; set; }
+    public DateTime? StartedAt { get; set; }
+    public DateTime? LastProgressAt { get; set; }
+    public double InputsPerSecond { get; set; }
+    public long EstimatedRemainingSeconds { get; set; }
+    public double ProgressPercent => QueueTotal <= 0 ? 0 : Math.Round(QueueCompleted * 100d / QueueTotal, 2);
     public long IndexedVideos { get; set; }
     public long PendingVideos { get; set; }
     public long FailedVideos { get; set; }
@@ -61,6 +79,23 @@ public sealed class VisualSearchState
 
     public void ResetIndexCounters()
     {
+        RunType = "none";
+        Stage = "idle";
+        CurrentVideoIndex = 0;
+        CurrentVideoTotal = 0;
+        CurrentVideoTitle = null;
+        CurrentFrameCompleted = 0;
+        CurrentFrameTotal = 0;
+        CurrentBatchIndex = 0;
+        CurrentBatchTotal = 0;
+        CurrentBatchItems = 0;
+        EmbeddingRequests = 0;
+        EmbeddingInputsCompleted = 0;
+        EmbeddingInputsTotal = 0;
+        StartedAt = null;
+        LastProgressAt = null;
+        InputsPerSecond = 0;
+        EstimatedRemainingSeconds = 0;
         IndexedVideos = 0;
         PendingVideos = 0;
         FailedVideos = 0;
@@ -78,6 +113,110 @@ public sealed class VisualSearchState
         LastErrorAt = null;
         FrameFailureReasons.Clear();
         QueueFailureReasons.Clear();
+    }
+
+    public void BeginRun(string runType, bool rebuild)
+    {
+        if (rebuild) ResetIndexCounters();
+        RunType = runType;
+        Status = "loading_library";
+        Stage = "loading_library";
+        QueueTotal = 0;
+        QueueCompleted = 0;
+        PendingVideos = 0;
+        QueueWaiting = 0;
+        CurrentVideoIndex = 0;
+        CurrentVideoTotal = 0;
+        CurrentVideoTitle = null;
+        CurrentFrameCompleted = 0;
+        CurrentFrameTotal = 0;
+        CurrentBatchIndex = 0;
+        CurrentBatchTotal = 0;
+        CurrentBatchItems = 0;
+        EmbeddingRequests = 0;
+        EmbeddingInputsCompleted = 0;
+        EmbeddingInputsTotal = 0;
+        StartedAt = DateTime.UtcNow;
+        LastProgressAt = StartedAt;
+        InputsPerSecond = 0;
+        EstimatedRemainingSeconds = 0;
+    }
+
+    public void SetQueue(long total)
+    {
+        QueueTotal = total;
+        PendingVideos = total;
+        LastProgressAt = DateTime.UtcNow;
+    }
+
+    public void SetVideo(long index, long total, string itemId, string title)
+    {
+        CurrentVideoIndex = index;
+        CurrentVideoTotal = total;
+        CurrentItemId = itemId;
+        CurrentVideoTitle = title;
+        CurrentFrameCompleted = 0;
+        CurrentFrameTotal = 0;
+        CurrentBatchIndex = 0;
+        CurrentBatchTotal = 0;
+        CurrentBatchItems = 0;
+        Stage = "preparing_video";
+        LastProgressAt = DateTime.UtcNow;
+    }
+
+    public void SetStage(string stage, long batchIndex, long batchTotal, long batchItems)
+    {
+        Stage = stage;
+        CurrentBatchIndex = batchIndex;
+        CurrentBatchTotal = batchTotal;
+        CurrentBatchItems = batchItems;
+        if (stage == "embedding_frames")
+        {
+            CurrentFrameTotal = batchItems;
+            CurrentFrameCompleted = 0;
+        }
+        LastProgressAt = DateTime.UtcNow;
+    }
+
+    public void SetBatchProgress(long batchIndex, long batchTotal, long count)
+    {
+        EmbeddingRequests++;
+        EmbeddingInputsCompleted += count;
+        CurrentBatchIndex = batchIndex;
+        CurrentBatchTotal = batchTotal;
+        CurrentBatchItems = count;
+        CurrentFrameCompleted = Math.Min(CurrentFrameTotal, CurrentFrameCompleted + count);
+        UpdateRate();
+    }
+
+    public void PlanEmbeddingInputs(long count) => EmbeddingInputsTotal += Math.Max(0, count);
+
+    public void RecordEmbeddingInputs(long count)
+    {
+        EmbeddingInputsCompleted += count;
+        UpdateRate();
+    }
+
+    public void RecordVideoCompleted(bool indexed)
+    {
+        if (indexed) IndexedVideos++;
+        QueueCompleted++;
+        PendingVideos = Math.Max(0, PendingVideos - 1);
+        Stage = "video_completed";
+        UpdateRate();
+    }
+
+    private void UpdateRate()
+    {
+        if (StartedAt is not { } started) return;
+        var elapsed = Math.Max(0.1, (DateTime.UtcNow - started).TotalSeconds);
+        InputsPerSecond = EmbeddingInputsCompleted / elapsed;
+        if (QueueCompleted > 0 && QueueTotal > QueueCompleted)
+        {
+            var videosPerSecond = QueueCompleted / elapsed;
+            EstimatedRemainingSeconds = (long)Math.Ceiling((QueueTotal - QueueCompleted) / videosPerSecond);
+        }
+        LastProgressAt = DateTime.UtcNow;
     }
 
     public void RecordFrameSuccess(int count)
