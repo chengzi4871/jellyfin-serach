@@ -7,6 +7,7 @@ using System.Net.Http;
 using System.Security.Claims;
 using System.IO;
 using MediaBrowser.Controller.Library;
+using MediaBrowser.Controller.Trickplay;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
 
@@ -22,14 +23,16 @@ public sealed class VisualSearchController : ControllerBase
     private readonly ILibraryManager _libraryManager;
     private readonly VideoIndexer _indexer;
     private readonly IndexCoordinator _coordinator;
+    private readonly ITrickplayManager _trickplay;
 
-    public VisualSearchController(VisualSearchState state, VisualSearchClient client, ILibraryManager libraryManager, VideoIndexer indexer, IndexCoordinator coordinator)
+    public VisualSearchController(VisualSearchState state, VisualSearchClient client, ILibraryManager libraryManager, VideoIndexer indexer, IndexCoordinator coordinator, ITrickplayManager trickplay)
     {
         _state = state;
         _client = client;
         _libraryManager = libraryManager;
         _indexer = indexer;
         _coordinator = coordinator;
+        _trickplay = trickplay;
     }
 
     [HttpGet("Health")]
@@ -68,7 +71,7 @@ public sealed class VisualSearchController : ControllerBase
     public object IndexStatus() => _state;
 
     [HttpGet("Stats")]
-    public object Stats() => new { indexVersion = 1, indexedVideos = _state.IndexedVideos, pending = _state.PendingVideos, failed = _state.FailedVideos };
+    public object Stats() => _state;
 
     [HttpPost("Search")]
     public async Task<ActionResult<SearchResponse>> Search([FromBody] SearchRequest request, CancellationToken cancellationToken)
@@ -115,9 +118,17 @@ public sealed class VisualSearchController : ControllerBase
             }).Where(x => x is not null).Cast<SearchResult>().ToArray();
             return Ok(new SearchResponse(request.Query, results, (long)(DateTime.UtcNow - started).TotalMilliseconds));
         }
-        catch (Exception ex) when (ex is HttpRequestException or TaskCanceledException)
+        catch (TaskCanceledException ex)
         {
-            return StatusCode(503, new { status = "offline", message = "semantic search computation node is offline" });
+            return StatusCode(504, new { status = "timeout", stage = "search", message = ex.Message });
+        }
+        catch (InvalidOperationException or InvalidDataException ex)
+        {
+            return BadRequest(new { status = "error", stage = "configuration", message = ex.Message });
+        }
+        catch (HttpRequestException ex)
+        {
+            return StatusCode(503, new { status = "error", stage = ex.Message.Contains("Qdrant", StringComparison.OrdinalIgnoreCase) ? "qdrant" : "cloud", message = ex.Message });
         }
     }
 
@@ -147,13 +158,13 @@ public sealed class VisualSearchController : ControllerBase
     }
 
     [HttpPost("Index/Rebuild")]
-    public IActionResult Rebuild() { _coordinator.Cancel(); _state.IndexedVideos = 0; _state.FailedVideos = 0; _coordinator.Start(); return Accepted(new { status = "queued_rebuild" }); }
+    public IActionResult Rebuild() { _coordinator.Rebuild(); return Accepted(new { status = "queued_rebuild" }); }
 
     [HttpPost("Index/Pause")]
-    public IActionResult Pause() { _state.Status = "paused"; return Ok(); }
+    public IActionResult Pause() { _coordinator.Pause(); return Ok(new { status = "paused" }); }
 
     [HttpPost("Index/Resume")]
-    public IActionResult Resume() { _state.Status = "queued"; return Ok(); }
+    public IActionResult Resume() { _coordinator.Resume(); return Ok(new { status = "resumed" }); }
 
     [HttpPost("Index/Cancel")]
     public IActionResult Cancel() { _coordinator.Cancel(); return Ok(); }
@@ -161,16 +172,23 @@ public sealed class VisualSearchController : ControllerBase
     [HttpPost("Index/Item")]
     public async Task<ActionResult> IndexItem([FromBody] IndexItemRequest request, CancellationToken cancellationToken)
     {
-        if (!Guid.TryParse(request.ItemId, out var itemId) || _libraryManager.GetItemById<MediaBrowser.Controller.Entities.Video>(itemId) is not { } video)
+        var userId = GetUserId();
+        if (!Guid.TryParse(request.ItemId, out var itemId) || _libraryManager.GetItemById<MediaBrowser.Controller.Entities.Video>(itemId, userId) is not { } video)
         {
             return NotFound();
         }
         _state.Status = "processing";
         var libraryId = request.LibraryId ?? string.Empty;
-        var indexed = await _indexer.IndexAsync(video, libraryId, cancellationToken).ConfigureAwait(false);
-        _state.IndexedVideos++;
-        _state.Status = "ready";
-        return Ok(new { itemId = video.Id, textIndexed = indexed.Text, framesIndexed = indexed.Frames });
+        try
+        {
+            var indexed = await _indexer.IndexAsync(video, libraryId, cancellationToken).ConfigureAwait(false);
+            _state.IndexedVideos++;
+            _state.Status = "ready";
+            return Ok(new { itemId = video.Id, textIndexed = indexed.Text, framesIndexed = indexed.Frames });
+        }
+        catch (TaskCanceledException ex) { return StatusCode(504, new { status = "timeout", stage = "index", message = ex.Message }); }
+        catch (InvalidOperationException or InvalidDataException ex) { return BadRequest(new { status = "error", stage = "configuration", message = ex.Message }); }
+        catch (HttpRequestException ex) { return StatusCode(503, new { status = "error", stage = "embedding", message = ex.Message }); }
     }
 
     [HttpPost("Test/Random")]
@@ -187,13 +205,7 @@ public sealed class VisualSearchController : ControllerBase
         {
             return StatusCode(503, new { status = "offline", message = "cloud embedding API or Qdrant is offline" });
         }
-        var videos = _libraryManager.GetItemList(new MediaBrowser.Controller.Entities.InternalItemsQuery
-        {
-            MediaTypes = new[] { Jellyfin.Data.Enums.MediaType.Video },
-            IsVirtualItem = false,
-            IsFolder = false,
-            Recursive = true
-        }).OfType<MediaBrowser.Controller.Entities.Video>().OrderBy(_ => Guid.NewGuid()).Take(count).ToArray();
+        var videos = await GetRandomVideosWithTrickplayAsync(count, GetUserId(), cancellationToken).ConfigureAwait(false);
         var results = new System.Collections.Generic.List<EmbeddingProbeResult>();
         foreach (var video in videos)
         {
@@ -219,14 +231,11 @@ public sealed class VisualSearchController : ControllerBase
         var videos = new List<MediaBrowser.Controller.Entities.Video>();
         foreach (var rawId in request?.ItemIds ?? Array.Empty<string>())
         {
-            if (Guid.TryParse(rawId, out var id) && _libraryManager.GetItemById<MediaBrowser.Controller.Entities.Video>(id) is { } video) videos.Add(video);
+            if (Guid.TryParse(rawId, out var id) && _libraryManager.GetItemById<MediaBrowser.Controller.Entities.Video>(id, GetUserId()) is { } video) videos.Add(video);
         }
         if (videos.Count == 0)
         {
-            videos = _libraryManager.GetItemList(new MediaBrowser.Controller.Entities.InternalItemsQuery
-            {
-                MediaTypes = new[] { Jellyfin.Data.Enums.MediaType.Video }, IsVirtualItem = false, IsFolder = false, Recursive = true
-            }).OfType<MediaBrowser.Controller.Entities.Video>().OrderBy(_ => Guid.NewGuid()).Take(count).ToList();
+            videos = (await GetRandomVideosWithTrickplayAsync(count, GetUserId(), cancellationToken).ConfigureAwait(false)).ToList();
         }
         var results = new List<DetailedProbeResult>();
         foreach (var video in videos.Take(count))
@@ -242,15 +251,29 @@ public sealed class VisualSearchController : ControllerBase
     public async Task<ActionResult> Preview([FromBody] PreviewRequest? request, CancellationToken cancellationToken)
     {
         MediaBrowser.Controller.Entities.Video? video = null;
+        var userId = GetUserId();
         if (Guid.TryParse(request?.ItemId, out var requestedId))
-            video = _libraryManager.GetItemById<MediaBrowser.Controller.Entities.Video>(requestedId);
-        video ??= _libraryManager.GetItemList(new MediaBrowser.Controller.Entities.InternalItemsQuery
-        {
-            MediaTypes = new[] { Jellyfin.Data.Enums.MediaType.Video }, IsVirtualItem = false, IsFolder = false, Recursive = true
-        }).OfType<MediaBrowser.Controller.Entities.Video>().OrderBy(_ => Guid.NewGuid()).FirstOrDefault();
+            video = _libraryManager.GetItemById<MediaBrowser.Controller.Entities.Video>(requestedId, userId);
+        video ??= (await GetRandomVideosWithTrickplayAsync(1, userId, cancellationToken).ConfigureAwait(false)).FirstOrDefault();
         if (video is null) return NotFound("No video is available for semantic acceptance");
         var frames = Math.Clamp(request?.FramesPerVideo ?? 3, 1, 8);
-        return Ok(await _indexer.PreviewAsync(video, frames, cancellationToken).ConfigureAwait(false));
+        var result = await _indexer.PreviewAsync(video, frames, cancellationToken).ConfigureAwait(false);
+        return Ok(result);
+    }
+
+    private async Task<IReadOnlyList<MediaBrowser.Controller.Entities.Video>> GetRandomVideosWithTrickplayAsync(int count, Guid userId, CancellationToken cancellationToken)
+    {
+        var candidates = new HashSet<Guid>();
+        const int pageSize = 1000;
+        for (var offset = 0; ; offset += pageSize)
+        {
+            var page = await _trickplay.GetTrickplayItemsAsync(pageSize, offset).ConfigureAwait(false);
+            foreach (var info in page) candidates.Add(info.ItemId);
+            if (page.Count < pageSize) break;
+            cancellationToken.ThrowIfCancellationRequested();
+        }
+
+        return candidates.OrderBy(_ => Random.Shared.Next()).Select(id => _libraryManager.GetItemById<MediaBrowser.Controller.Entities.Video>(id, userId)).Where(x => x is not null).Cast<MediaBrowser.Controller.Entities.Video>().Take(count).ToArray();
     }
 
     private Guid GetUserId()
