@@ -176,6 +176,7 @@ public sealed class VisualSearchClient
         if (values.Count == 0) return Array.Empty<float[]>();
         if (string.IsNullOrWhiteSpace(config.EmbeddingBaseUrl)) throw new VisualSearchConfigurationException("Embedding Base URL is not configured");
         if (string.IsNullOrWhiteSpace(config.EmbeddingModel)) throw new VisualSearchConfigurationException("Embedding model is not configured");
+        if (config.EmbeddingDimension <= 0) throw new VisualSearchConfigurationException("Embedding dimension must be greater than 0. Set it to the same dimension as the Qdrant collections (for this deployment: 1024); leaving it at 0 omits the dimensions parameter and can return the model's native dimension instead.");
         var endpoint = config.EmbeddingBaseUrl.TrimEnd('/');
         if (!endpoint.EndsWith("/embeddings", StringComparison.OrdinalIgnoreCase)) endpoint += "/embeddings";
         var bodies = BuildBodies(config, values, kind).ToArray();
@@ -254,6 +255,7 @@ public sealed class VisualSearchClient
     {
         var config = _configurationProvider();
         if (string.IsNullOrWhiteSpace(config.QdrantUrl)) throw new VisualSearchConfigurationException("Qdrant URL is not configured");
+        if (config.EmbeddingDimension <= 0) throw new VisualSearchConfigurationException("Embedding dimension must be greater than 0 before initializing Qdrant collections. Set it to the collection dimension (for this deployment: 1024), then initialize Qdrant again.");
         var body = new { vectors = new { size = config.EmbeddingDimension, distance = "Cosine" } };
         foreach (var collection in new[] { "jellyfin_video_text", "jellyfin_video_frames" })
         {
