@@ -174,7 +174,7 @@ public sealed class VideoIndexer
             }
             byte[] bytes;
             try { bytes = await ReadFrameAsync(path, frame, info, cancellationToken).ConfigureAwait(false); }
-            catch (Exception ex) when (ex is not OperationCanceledException and ex is not OutOfMemoryException)
+            catch (Exception ex) when (ex is not OperationCanceledException && ex is not OutOfMemoryException)
             {
                 failures["tile_read_error"] = failures.TryGetValue("tile_read_error", out var readError) ? readError + 1 : 1;
                 continue;
