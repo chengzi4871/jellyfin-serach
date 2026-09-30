@@ -10,7 +10,7 @@ Jellyfin 插件 ── HTTP/HTTPS ── 云端多模态 Embedding API
        └──────────── HTTP ──── Qdrant（Ubuntu）
 ```
 
-所有运行配置都在 Jellyfin 的 Visual Search 页面填写：Embedding Base URL、模型、API Key、协议、向量维度、超时、Qdrant URL 和索引参数。云端 API 必须让文本和图片处于同一个向量空间；只有纯文本 `/v1/embeddings` 的服务不能用于视觉检索。
+所有运行配置都在 Jellyfin 的 Visual Search 页面填写：Embedding Base URL、模型、API Key、协议、输入格式、向量维度、超时、Qdrant URL 和索引参数。`auto` 输入格式优先发送 `[{"text":"..."}]` 或 `[{"image":"data:..."}]`，遇到 HTTP 400 会依次尝试纯字符串和 OpenAI `type/image_url` 形状；`EmbeddingDimension > 0` 时请求会带 `dimensions`。云端 API 必须让文本和图片处于同一个向量空间；只有纯文本 `/v1/embeddings` 的服务不能用于视觉检索。
 
 API Key 不会出现在健康检查返回值或普通日志中，但会保存在 Jellyfin 插件配置中，请限制配置目录的访问权限。
 
@@ -48,13 +48,13 @@ docker restart jellyfin
 
 ## 第一次测试
 
-1. 填写 Embedding Base URL、模型、API Key、维度和 Qdrant URL。
-2. 点击“保存”和“测试云端与 Qdrant”。
-3. 点击“初始化 Qdrant”。
-4. 先用“语义能力验收”测试 1～3 个视频、每个视频 1～3 帧。
-5. 确认供应商接受图片且返回维度正确，再开始增量索引。
+1. 填写 Embedding Base URL、模型、API Key、维度和 Qdrant URL；Docker 中不要填写 `127.0.0.1`，除非 Qdrant 与 Jellyfin 在同一容器。
+2. 点击“保存并检查连接”。失败时页面会显示失败阶段（cloud 或 qdrant）、HTTP 状态和服务端错误文案。
+3. 点击“初始化 Qdrant”；该操作是幂等的，已存在的集合会直接复用。
+4. 在“语义能力验收”中随机选择一个视频，先检查即将发送的标题与裁切帧；确认后才调用模型，需要更换时重新随机选择。
+5. 确认模型返回向量后手动输入查询词，查看标题和每帧的余弦相似度，再开始增量索引。
 
-语义能力验收会展示实际送入模型的标题和单独视频帧，并计算“沙滩上的美女”“红色比基尼”“黑发”“金发”等查询与图片/标题向量的余弦相似度；测试不会写入正式 Qdrant 集合。
+语义能力验收展示实际送入模型的标题和单独视频帧；查询词不预填写，由用户自行输入。测试不会写入正式 Qdrant 集合，也不再提供重复的小批量安全测试入口。
 
 ## 采样、去重和排序
 
@@ -70,8 +70,8 @@ FinalScore = VisualScore × VisualWeight + TitleScore × TitleWeight
 ## API 和兼容性
 
 - `GET /VisualSearch/Health`：测试云端 Embedding 和 Qdrant；
-- `POST /VisualSearch/Test/Random`：随机小批量安全测试；
-- `POST /VisualSearch/Test/Inspect`：展示标题、图片和查询相似度；
+- `POST /VisualSearch/Test/Preview`：随机选择视频并只提取即将发送的标题和裁切帧，不调用模型；
+- `POST /VisualSearch/Test/Inspect`：在用户确认后调用模型，展示返回向量摘要，并在有查询词时计算相似度；
 - `POST /VisualSearch/Index/Ensure`：初始化集合；
 - `POST /VisualSearch/Index/Incremental`：增量索引；
 - `POST /VisualSearch/Index/Rebuild`：完整重建；
