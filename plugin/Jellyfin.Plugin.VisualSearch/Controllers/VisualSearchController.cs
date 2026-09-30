@@ -83,25 +83,29 @@ public sealed class VisualSearchController : ControllerBase
         try
         {
             var started = DateTime.UtcNow;
-            var vector = await _client.EmbedTextAsync(request.Query, cancellationToken).ConfigureAwait(false);
-            var textHitsTask = _client.SearchAsync(vector, "jellyfin_video_text", 100, cancellationToken);
-            var frameHitsTask = _client.SearchAsync(vector, "jellyfin_video_frames", 500, cancellationToken);
+            var vector = await _client.EmbedQueryTextAsync(request.Query, cancellationToken).ConfigureAwait(false);
+            var textHitsTask = _client.SearchAsync(vector, "jellyfin_video_text", 100, cancellationToken, request.LibraryIds);
+            var frameHitsTask = _client.SearchAsync(vector, "jellyfin_video_frames", 500, cancellationToken, request.LibraryIds);
             await Task.WhenAll(textHitsTask, frameHitsTask).ConfigureAwait(false);
             var textHits = await textHitsTask.ConfigureAwait(false);
             var frameHits = await frameHitsTask.ConfigureAwait(false);
-            var titleScores = textHits.GroupBy(x => x.ItemId).ToDictionary(x => x.Key, x => x.Max(y => y.Score));
-            var frameGroups = frameHits.GroupBy(x => x.ItemId).ToDictionary(x => x.Key, x => x.OrderByDescending(y => y.Score).ToList());
+            var titleHits = NormalizeHits(textHits);
+            var visualHits = NormalizeHits(frameHits);
+            var titleScores = titleHits.GroupBy(x => x.Hit.ItemId).ToDictionary(x => x.Key, x => x.Max(y => y.NormalizedScore));
+            var frameGroups = visualHits.GroupBy(x => x.Hit.ItemId).ToDictionary(x => x.Key, x => x.OrderByDescending(y => y.NormalizedScore).ToList());
             var candidates = titleScores.Keys.Concat(frameGroups.Keys).Distinct().Select(itemId =>
             {
                 frameGroups.TryGetValue(itemId, out var frames);
                 titleScores.TryGetValue(itemId, out var titleScore);
-                double? visualScore = frames is null || frames.Count == 0 ? null : 0.7 * frames[0].Score + 0.3 * frames.Take(3).Average(x => x.Score);
+                double? visualScore = frames is null || frames.Count == 0 ? null : AggregateVisualScore(frames);
                 var vw = Plugin.Instance?.Configuration.VisualWeight ?? 0.75;
                 var tw = Plugin.Instance?.Configuration.TitleWeight ?? 0.25;
+                vw = Math.Max(0, vw);
+                tw = Math.Max(0, tw);
                 var final = visualScore.HasValue && titleScores.ContainsKey(itemId)
-                    ? (visualScore.Value * vw + titleScore * tw) / (vw + tw)
+                    ? (vw + tw) <= 0 ? 0 : (visualScore.Value * vw + titleScore * tw) / (vw + tw)
                     : visualScore ?? titleScore;
-                var best = frames is { Count: > 0 } ? frames[0] : null;
+                var best = frames is { Count: > 0 } ? frames[0].Hit : null;
                 var frame = best is null ? null : new BestFrame(
                     best.Payload.TryGetProperty("frameIndex", out var fi) ? fi.GetInt32() : 0,
                     best.Payload.TryGetProperty("timestampMs", out var ts) ? ts.GetInt64() : 0,
@@ -178,7 +182,9 @@ public sealed class VisualSearchController : ControllerBase
             return NotFound();
         }
         _state.Status = "processing";
-        var libraryId = request.LibraryId ?? string.Empty;
+        var libraryId = string.IsNullOrWhiteSpace(request.LibraryId)
+            ? _libraryManager.GetCollectionFolders(video).FirstOrDefault()?.Id.ToString() ?? string.Empty
+            : request.LibraryId;
         try
         {
             var indexed = await _indexer.IndexAsync(video, libraryId, cancellationToken).ConfigureAwait(false);
@@ -284,6 +290,48 @@ public sealed class VisualSearchController : ControllerBase
         return candidates.OrderBy(_ => Random.Shared.Next()).Select(id => _libraryManager.GetItemById<MediaBrowser.Controller.Entities.Video>(id, userId)).Where(x => x is not null).Cast<MediaBrowser.Controller.Entities.Video>().Take(count).ToArray();
     }
 
+    private static IReadOnlyList<ScoredSearchHit> NormalizeHits(IReadOnlyList<RemoteSearchHit> hits)
+    {
+        if (hits.Count == 0) return Array.Empty<ScoredSearchHit>();
+        var ordered = hits.Select(x => x.Score).OrderBy(x => x).ToArray();
+        var low = Percentile(ordered, 0.10);
+        var high = Percentile(ordered, 0.90);
+        if (high - low < 1e-9)
+        {
+            low = ordered[0];
+            high = ordered[^1];
+        }
+        return hits.Select((hit, index) =>
+        {
+            var normalized = high - low < 1e-9
+                ? hits.Count == 1 ? 1d : index / (double)(hits.Count - 1)
+                : Math.Clamp((hit.Score - low) / (high - low), 0, 1);
+            return new ScoredSearchHit(hit, normalized);
+        }).ToArray();
+    }
+
+    private static double Percentile(double[] values, double percentile)
+    {
+        if (values.Length == 0) return 0;
+        var position = (values.Length - 1) * percentile;
+        var lower = (int)Math.Floor(position);
+        var upper = (int)Math.Ceiling(position);
+        if (lower == upper) return values[lower];
+        var fraction = position - lower;
+        return values[lower] + (values[upper] - values[lower]) * fraction;
+    }
+
+    private static double AggregateVisualScore(IReadOnlyList<ScoredSearchHit> frames)
+    {
+        var top = frames.Take(5).Select(x => x.NormalizedScore).ToArray();
+        var topOne = top[0];
+        var topThree = top.Take(3).Average();
+        var topFive = top.Average();
+        // The best frame carries the strongest signal, while the smaller averages
+        // prevent a single accidental match from dominating the video score.
+        return 0.50 * topOne + 0.30 * topThree + 0.20 * topFive;
+    }
+
     private Guid GetUserId()
     {
         var claim = User.FindFirst("Jellyfin-UserId")?.Value ?? User.FindFirst(ClaimTypes.NameIdentifier)?.Value;
@@ -291,6 +339,7 @@ public sealed class VisualSearchController : ControllerBase
     }
 }
 
+internal sealed record ScoredSearchHit(RemoteSearchHit Hit, double NormalizedScore);
 public sealed record SearchRequest(string Query, string[]? LibraryIds = null, int Limit = 30);
 public sealed record IndexItemRequest(string ItemId, string? LibraryId = null);
 public sealed record RandomTestRequest(int Count = 3, int FramesPerVideo = 2);
