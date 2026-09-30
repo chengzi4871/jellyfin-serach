@@ -133,7 +133,8 @@ public sealed class IndexCoordinator
                 await WaitIfPausedAsync(cancellationToken).ConfigureAwait(false);
                 _state.SetVideo(index + 1, videos.Count, video.Id.ToString(), video.Name);
 
-                var indexed = await IndexWithRetryAsync(video, cancellationToken).ConfigureAwait(false);
+                var libraryId = _library.GetCollectionFolders(video).FirstOrDefault()?.Id.ToString() ?? string.Empty;
+                var indexed = await IndexWithRetryAsync(video, libraryId, cancellationToken).ConfigureAwait(false);
                 _state.RecordVideoCompleted(indexed);
             }
 
@@ -170,7 +171,7 @@ public sealed class IndexCoordinator
         }
     }
 
-    private async Task<bool> IndexWithRetryAsync(Video video, CancellationToken cancellationToken)
+    private async Task<bool> IndexWithRetryAsync(Video video, string libraryId, CancellationToken cancellationToken)
     {
         var retryDelay = Math.Clamp(Plugin.Instance?.Configuration.IndexRetryDelaySeconds ?? 15, 1, 3600);
         var attempt = 0;
@@ -178,7 +179,7 @@ public sealed class IndexCoordinator
         {
             try
             {
-                await _indexer.IndexAsync(video, string.Empty, cancellationToken).ConfigureAwait(false);
+                await _indexer.IndexAsync(video, libraryId, cancellationToken).ConfigureAwait(false);
                 _state.RecordError(string.Empty);
                 _state.QueueWaiting = 0;
                 _state.CurrentRetryAttempt = 0;
