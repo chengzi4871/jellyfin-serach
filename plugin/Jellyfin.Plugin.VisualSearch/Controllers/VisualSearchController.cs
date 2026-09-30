@@ -304,7 +304,7 @@ public sealed class VisualSearchController : ControllerBase
         return hits.Select((hit, index) =>
         {
             var normalized = high - low < 1e-9
-                ? hits.Count == 1 ? 1d : index / (double)(hits.Count - 1)
+                ? hits.Count == 1 ? 1d : 0.5d
                 : Math.Clamp((hit.Score - low) / (high - low), 0, 1);
             return new ScoredSearchHit(hit, normalized);
         }).ToArray();
