@@ -48,6 +48,8 @@ public sealed class PluginConfiguration : BasePluginConfiguration
     /// <summary>Legacy setting retained so older XML configurations continue to load.</summary>
     public int FramesPerVideo { get; set; } = 12;
     public bool FrameDeduplicationEnabled { get; set; } = true;
+    /// <summary>Use a small sparse probe pass to prefer scene boundaries on long videos.</summary>
+    public bool SceneChangeSamplingEnabled { get; set; } = true;
     public double VisualWeight { get; set; } = 0.75;
     public double TitleWeight { get; set; } = 0.25;
     public bool ScheduledIndexEnabled { get; set; } = false;
