@@ -150,7 +150,7 @@ public sealed class VisualSearchClient
             {
                 using var document = JsonDocument.Parse(await existing.Content.ReadAsStreamAsync(cancellationToken).ConfigureAwait(false));
                 if (TryReadCollectionDimension(document.RootElement, out var existingDimension) && config.EmbeddingDimension > 0 && existingDimension != config.EmbeddingDimension)
-                    throw new InvalidOperationException($"Qdrant collection {collection} uses dimension {existingDimension}, but the current embedding configuration is {config.EmbeddingDimension}. Recreate the collection before indexing with this model dimension.");
+                    throw new InvalidOperationException($"Qdrant collection '{collection}' dimension mismatch: actual dimension={existingDimension}, configured dimension={config.EmbeddingDimension}. Delete collection '{collection}' in Qdrant, then click '初始化 Qdrant' to recreate it before indexing.");
                 continue;
             }
             if (existing.StatusCode != HttpStatusCode.NotFound)
