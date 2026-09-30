@@ -47,6 +47,10 @@ public sealed class VisualSearchState
     public string? CurrentVideoTitle { get; set; }
     public long CurrentFrameCompleted { get; set; }
     public long CurrentFrameTotal { get; set; }
+    public long CurrentFramesSampled { get; set; }
+    public long CurrentFramesDeduplicated { get; set; }
+    public long CurrentRetryAttempt { get; set; }
+    public DateTime? NextRetryAt { get; set; }
     public long CurrentBatchIndex { get; set; }
     public long CurrentBatchTotal { get; set; }
     public long CurrentBatchItems { get; set; }
@@ -86,6 +90,10 @@ public sealed class VisualSearchState
         CurrentVideoTitle = null;
         CurrentFrameCompleted = 0;
         CurrentFrameTotal = 0;
+        CurrentFramesSampled = 0;
+        CurrentFramesDeduplicated = 0;
+        CurrentRetryAttempt = 0;
+        NextRetryAt = null;
         CurrentBatchIndex = 0;
         CurrentBatchTotal = 0;
         CurrentBatchItems = 0;
@@ -130,6 +138,10 @@ public sealed class VisualSearchState
         CurrentVideoTitle = null;
         CurrentFrameCompleted = 0;
         CurrentFrameTotal = 0;
+        CurrentFramesSampled = 0;
+        CurrentFramesDeduplicated = 0;
+        CurrentRetryAttempt = 0;
+        NextRetryAt = null;
         CurrentBatchIndex = 0;
         CurrentBatchTotal = 0;
         CurrentBatchItems = 0;
@@ -157,6 +169,10 @@ public sealed class VisualSearchState
         CurrentVideoTitle = title;
         CurrentFrameCompleted = 0;
         CurrentFrameTotal = 0;
+        CurrentFramesSampled = 0;
+        CurrentFramesDeduplicated = 0;
+        CurrentRetryAttempt = 0;
+        NextRetryAt = null;
         CurrentBatchIndex = 0;
         CurrentBatchTotal = 0;
         CurrentBatchItems = 0;
@@ -189,10 +205,13 @@ public sealed class VisualSearchState
         UpdateRate();
     }
 
+    public void DiscardPendingInputs() => EmbeddingInputsTotal = EmbeddingInputsCompleted;
+
     public void PlanEmbeddingInputs(long count) => EmbeddingInputsTotal += Math.Max(0, count);
 
     public void RecordEmbeddingInputs(long count)
     {
+        EmbeddingRequests++;
         EmbeddingInputsCompleted += count;
         UpdateRate();
     }
@@ -211,7 +230,8 @@ public sealed class VisualSearchState
         if (StartedAt is not { } started) return;
         var elapsed = Math.Max(0.1, (DateTime.UtcNow - started).TotalSeconds);
         InputsPerSecond = EmbeddingInputsCompleted / elapsed;
-        if (QueueCompleted > 0 && QueueTotal > QueueCompleted)
+        if (QueueCompleted >= QueueTotal) EstimatedRemainingSeconds = 0;
+        else if (QueueCompleted > 0)
         {
             var videosPerSecond = QueueCompleted / elapsed;
             EstimatedRemainingSeconds = (long)Math.Ceiling((QueueTotal - QueueCompleted) / videosPerSecond);
