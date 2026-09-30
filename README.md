@@ -40,9 +40,9 @@ meta.json
 不要把 `MediaBrowser.*`、`Jellyfin.*`、`Microsoft.Extensions.*` 或 EntityFrameworkCore 等框架副本复制进插件目录，否则可能出现程序集加载后插件实例无法创建、后台不显示且日志不明显报错的问题。
 
 ```bash
-rm -rf ~/docker/jellyfin/config/data/plugins/VisualSearch_0.1.0.4
-mkdir -p ~/docker/jellyfin/config/data/plugins/VisualSearch_0.1.0.4
-unzip visual-search-plugin.zip -d ~/docker/jellyfin/config/data/plugins/VisualSearch_0.1.0.4
+rm -rf ~/docker/jellyfin/config/data/plugins/VisualSearch_0.1.0.5
+mkdir -p ~/docker/jellyfin/config/data/plugins/VisualSearch_0.1.0.5
+unzip visual-search-plugin.zip -d ~/docker/jellyfin/config/data/plugins/VisualSearch_0.1.0.5
 docker restart jellyfin
 ```
 
