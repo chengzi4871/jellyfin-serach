@@ -6,10 +6,16 @@ using System.Net.Http.Headers;
 using System.Net.Http.Json;
 using System.Net;
 using System.Linq;
+using System.Globalization;
+using System.Net.Sockets;
 using System.Text;
 using System.Text.Json;
 using System.Threading;
 using System.Threading.Tasks;
+using SixLabors.ImageSharp;
+using SixLabors.ImageSharp.Formats.Jpeg;
+using SixLabors.ImageSharp.Processing;
+using SixLabors.ImageSharp.PixelFormats;
 
 namespace Jellyfin.Plugin.VisualSearch;
 
@@ -51,8 +57,20 @@ public sealed class VisualSearchClient
 
     public Task<float[]> EmbedImageAsync(byte[] image, CancellationToken cancellationToken)
     {
+        image = PrepareImage(image);
         var mime = DetectMime(image);
         return EmbedAsync($"data:{mime};base64,{Convert.ToBase64String(image)}", "image", cancellationToken);
+    }
+
+    public static bool IsRetryable(Exception exception)
+    {
+        if (exception is TaskCanceledException or TimeoutException or IOException or SocketException) return true;
+        if (exception is HttpRequestException http)
+        {
+            var status = (int?)http.StatusCode;
+            return status is null or 408 or 425 or 429 or >= 500;
+        }
+        return false;
     }
 
     private async Task<float[]> EmbedAsync(string value, string kind, CancellationToken cancellationToken)
@@ -73,6 +91,8 @@ public sealed class VisualSearchClient
             if (!response.IsSuccessStatusCode)
             {
                 lastError = await ReadErrorAsync(response, "Embedding API").ConfigureAwait(false);
+                if (response.StatusCode == HttpStatusCode.RequestEntityTooLarge)
+                    throw new HttpRequestException($"Embedding API rejected the image body with HTTP 413 (Payload Too Large). The plugin downsampled images to {GetConfig().EmbeddingMaxImageDimension}px; reduce that setting or increase the provider body limit. Response: {lastError}", null, response.StatusCode);
                 // A provider may reject one input shape while accepting another. Retry only 400s;
                 // authentication, rate limit and server errors must be surfaced immediately.
                 if (response.StatusCode == HttpStatusCode.BadRequest && body != bodies[^1]) continue;
@@ -113,8 +133,8 @@ public sealed class VisualSearchClient
     public async Task UpsertAsync(string collection, IEnumerable<object> points, CancellationToken cancellationToken)
     {
         var config = GetConfig();
-        using var response = await _http.PutAsJsonAsync(config.QdrantUrl.TrimEnd('/') + "/collections/" + Uri.EscapeDataString(collection) + "/points?wait=true", new { points }, cancellationToken).ConfigureAwait(false);
-        response.EnsureSuccessStatusCode();
+        using var response = await _http.PutAsJsonAsync(GetQdrantUrl(config) + "/collections/" + Uri.EscapeDataString(collection) + "/points?wait=true", new { points }, cancellationToken).ConfigureAwait(false);
+        await EnsureSuccessWithDetailsAsync(response, $"Qdrant upsert ({collection})").ConfigureAwait(false);
     }
 
     public async Task EnsureCollectionsAsync(CancellationToken cancellationToken)
@@ -124,7 +144,7 @@ public sealed class VisualSearchClient
         var body = new { vectors = new { size = config.EmbeddingDimension, distance = "Cosine" } };
         foreach (var collection in new[] { "jellyfin_video_text", "jellyfin_video_frames" })
         {
-            var url = config.QdrantUrl.TrimEnd('/') + "/collections/" + collection;
+            var url = GetQdrantUrl(config) + "/collections/" + collection;
             using var existing = await _http.GetAsync(url, cancellationToken).ConfigureAwait(false);
             if (existing.IsSuccessStatusCode)
             {
@@ -170,8 +190,8 @@ public sealed class VisualSearchClient
     public async Task<IReadOnlyList<RemoteSearchHit>> SearchAsync(float[] vector, string collection, int limit, CancellationToken cancellationToken)
     {
         var config = GetConfig();
-        using var response = await _http.PostAsJsonAsync(config.QdrantUrl.TrimEnd('/') + "/collections/" + Uri.EscapeDataString(collection) + "/points/search", new { vector, limit, with_payload = true }, cancellationToken).ConfigureAwait(false);
-        response.EnsureSuccessStatusCode();
+        using var response = await _http.PostAsJsonAsync(GetQdrantUrl(config) + "/collections/" + Uri.EscapeDataString(collection) + "/points/search", new { vector, limit, with_payload = true }, cancellationToken).ConfigureAwait(false);
+        await EnsureSuccessWithDetailsAsync(response, $"Qdrant search ({collection})").ConfigureAwait(false);
         using var document = JsonDocument.Parse(await response.Content.ReadAsStreamAsync(cancellationToken).ConfigureAwait(false));
         var hits = new List<RemoteSearchHit>();
         if (!document.RootElement.TryGetProperty("result", out var result)) return hits;
@@ -185,6 +205,12 @@ public sealed class VisualSearchClient
 
     private static PluginConfiguration GetConfig() => Plugin.Instance?.Configuration ?? new PluginConfiguration();
 
+    private static string GetQdrantUrl(PluginConfiguration config)
+    {
+        if (string.IsNullOrWhiteSpace(config.QdrantUrl)) throw new InvalidOperationException("Qdrant URL is not configured. In Docker, use the host or Qdrant container address instead of 127.0.0.1.");
+        return config.QdrantUrl.TrimEnd('/');
+    }
+
     private static float[] ReadVector(JsonElement body)
     {
         JsonElement? value = null;
@@ -195,10 +221,39 @@ public sealed class VisualSearchClient
         }
         if (value is null && body.TryGetProperty("embedding", out var direct)) value = direct;
         if (value is null && body.TryGetProperty("vector", out var vector)) value = vector;
-        if (value is null || value.Value.ValueKind != JsonValueKind.Array) throw new InvalidDataException("Embedding response does not contain a vector");
+        if (value is null || value.Value.ValueKind != JsonValueKind.Array)
+            throw new InvalidDataException($"Embedding response does not contain a vector array. Actual value type: {value?.Value.ValueKind.ToString() ?? "missing"}. Response: {Truncate(body.GetRawText())}");
         var result = new float[value.Value.GetArrayLength()]; var i = 0;
-        foreach (var item in value.Value.EnumerateArray()) result[i++] = item.GetSingle();
+        foreach (var item in value.Value.EnumerateArray())
+        {
+            if (item.ValueKind == JsonValueKind.Number && item.TryGetSingle(out var number)) result[i++] = number;
+            else if (item.ValueKind == JsonValueKind.String && float.TryParse(item.GetString(), NumberStyles.Float, CultureInfo.InvariantCulture, out var parsed)) result[i++] = parsed;
+            else throw new InvalidDataException($"Embedding vector contains unsupported element type {item.ValueKind} at index {i}. Response: {Truncate(body.GetRawText())}");
+        }
         return result;
+    }
+
+    private static string Truncate(string value) => value.Length <= 500 ? value : value[..500];
+
+    private static byte[] PrepareImage(byte[] image)
+    {
+        var maxDimension = Math.Clamp(GetConfig().EmbeddingMaxImageDimension, 128, 4096);
+        try
+        {
+            using var input = Image.Load<Rgba32>(image);
+            if (Math.Max(input.Width, input.Height) <= maxDimension && image.Length <= 1024 * 1024) return image;
+            var scale = Math.Min(1d, maxDimension / (double)Math.Max(input.Width, input.Height));
+            var width = Math.Max(1, (int)Math.Round(input.Width * scale));
+            var height = Math.Max(1, (int)Math.Round(input.Height * scale));
+            input.Mutate(ctx => ctx.Resize(width, height));
+            using var output = new MemoryStream();
+            input.SaveAsJpeg(output, new JpegEncoder { Quality = 82 });
+            return output.ToArray();
+        }
+        catch (Exception ex) when (ex is not OutOfMemoryException)
+        {
+            throw new InvalidDataException($"Unable to prepare image for Embedding API: {ex.Message}", ex);
+        }
     }
 
     private static string DetectMime(byte[] image) => image.Length >= 8 && image[0] == 0x89 && image[1] == 0x50 ? "image/png" : image.Length >= 6 && image[0] == 0x47 && image[1] == 0x49 ? "image/gif" : image.Length >= 12 && image[0] == 0x52 && image[1] == 0x49 && image[8] == 0x57 ? "image/webp" : "image/jpeg";
