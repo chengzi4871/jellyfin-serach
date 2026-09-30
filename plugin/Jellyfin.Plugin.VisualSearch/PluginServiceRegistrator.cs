@@ -48,6 +48,7 @@ public sealed class VisualSearchState
     public long CurrentFrameCompleted { get; set; }
     public long CurrentFrameTotal { get; set; }
     public long CurrentFramesSampled { get; set; }
+    public long CurrentFramesSceneDiscarded { get; set; }
     public long CurrentFramesDeduplicated { get; set; }
     public long CurrentRetryAttempt { get; set; }
     public DateTime? NextRetryAt { get; set; }
@@ -91,6 +92,7 @@ public sealed class VisualSearchState
         CurrentFrameCompleted = 0;
         CurrentFrameTotal = 0;
         CurrentFramesSampled = 0;
+        CurrentFramesSceneDiscarded = 0;
         CurrentFramesDeduplicated = 0;
         CurrentRetryAttempt = 0;
         NextRetryAt = null;
@@ -139,6 +141,7 @@ public sealed class VisualSearchState
         CurrentFrameCompleted = 0;
         CurrentFrameTotal = 0;
         CurrentFramesSampled = 0;
+        CurrentFramesSceneDiscarded = 0;
         CurrentFramesDeduplicated = 0;
         CurrentRetryAttempt = 0;
         NextRetryAt = null;
@@ -170,6 +173,7 @@ public sealed class VisualSearchState
         CurrentFrameCompleted = 0;
         CurrentFrameTotal = 0;
         CurrentFramesSampled = 0;
+        CurrentFramesSceneDiscarded = 0;
         CurrentFramesDeduplicated = 0;
         CurrentRetryAttempt = 0;
         NextRetryAt = null;
