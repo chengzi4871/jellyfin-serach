@@ -62,7 +62,7 @@ public sealed class VideoIndexer
             var failureCount = Math.Max(1, frameFailureReasons.Values.Sum());
             _state.RecordFrameFailure(primaryReason, failureCount);
             foreach (var reason in frameFailureReasons.Where(x => !string.Equals(x.Key, primaryReason, StringComparison.OrdinalIgnoreCase)))
-                _state.FailureReasons.AddOrUpdate(reason.Key, reason.Value, (_, old) => old + reason.Value);
+                _state.FrameFailureReasons.AddOrUpdate(reason.Key, reason.Value, (_, old) => old + reason.Value);
         }
         return (true, frames.Count);
     }
