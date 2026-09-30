@@ -56,7 +56,8 @@ public sealed class VisualSearchState
     public string? LastError { get; set; }
     public DateTime? LastErrorAt { get; set; }
     public bool Paused { get; set; }
-    public ConcurrentDictionary<string, long> FailureReasons { get; } = new(StringComparer.OrdinalIgnoreCase);
+    public ConcurrentDictionary<string, long> FrameFailureReasons { get; } = new(StringComparer.OrdinalIgnoreCase);
+    public ConcurrentDictionary<string, long> QueueFailureReasons { get; } = new(StringComparer.OrdinalIgnoreCase);
 
     public void ResetIndexCounters()
     {
@@ -75,7 +76,8 @@ public sealed class VisualSearchState
         CurrentItemId = null;
         LastError = null;
         LastErrorAt = null;
-        FailureReasons.Clear();
+        FrameFailureReasons.Clear();
+        QueueFailureReasons.Clear();
     }
 
     public void RecordFrameSuccess(int count)
@@ -88,7 +90,7 @@ public sealed class VisualSearchState
     {
         VideosWithoutFrames++;
         FrameReadFailures += count;
-        FailureReasons.AddOrUpdate(reason, count, (_, old) => old + count);
+        FrameFailureReasons.AddOrUpdate(reason, count, (_, old) => old + count);
     }
 
     public void RecordError(string message)
