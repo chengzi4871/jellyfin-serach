@@ -19,11 +19,15 @@ public sealed class VideoIndexer
 {
     private readonly VisualSearchClient _client;
     private readonly ITrickplayManager _trickplay;
+    private readonly ILibraryManager _library;
+    private readonly VisualSearchState _state;
 
-    public VideoIndexer(VisualSearchClient client, ITrickplayManager trickplay)
+    public VideoIndexer(VisualSearchClient client, ITrickplayManager trickplay, ILibraryManager library, VisualSearchState state)
     {
         _client = client;
         _trickplay = trickplay;
+        _library = library;
+        _state = state;
     }
 
     public async Task<(bool Text, int Frames)> IndexAsync(Video video, string libraryId, CancellationToken cancellationToken)
@@ -35,12 +39,15 @@ public sealed class VideoIndexer
         }, cancellationToken).ConfigureAwait(false);
 
         var frames = new List<object>();
+        var frameFailureReasons = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
         var manifest = await _trickplay.GetTrickplayManifest(video).ConfigureAwait(false);
         foreach (var mediaSource in manifest.Values)
         {
             if (mediaSource.Count == 0) continue;
             var info = mediaSource.OrderBy(x => x.Key).First().Value;
-            var samples = await ReadDistinctFramesAsync(video, info, Plugin.Instance?.Configuration.FramesPerVideo ?? 12, cancellationToken).ConfigureAwait(false);
+            var read = await ReadDistinctFramesAsync(video, info, Plugin.Instance?.Configuration.FramesPerVideo ?? 12, cancellationToken).ConfigureAwait(false);
+            var samples = read.Samples;
+            foreach (var reason in read.FailureReasons) frameFailureReasons[reason.Key] = frameFailureReasons.TryGetValue(reason.Key, out var old) ? old + reason.Value : reason.Value;
             foreach (var sample in samples)
             {
                 var vector = await _client.EmbedImageAsync(sample.Bytes, cancellationToken).ConfigureAwait(false);
@@ -48,6 +55,15 @@ public sealed class VideoIndexer
             }
         }
         if (frames.Count > 0) await _client.UpsertAsync("jellyfin_video_frames", frames, cancellationToken).ConfigureAwait(false);
+        if (frames.Count > 0) _state.RecordFrameSuccess(frames.Count);
+        else
+        {
+            var primaryReason = frameFailureReasons.Count == 0 ? "no_trickplay_frames" : frameFailureReasons.Keys.First();
+            var failureCount = Math.Max(1, frameFailureReasons.Values.Sum());
+            _state.RecordFrameFailure(primaryReason, failureCount);
+            foreach (var reason in frameFailureReasons.Where(x => !string.Equals(x.Key, primaryReason, StringComparison.OrdinalIgnoreCase)))
+                _state.FailureReasons.AddOrUpdate(reason.Key, reason.Value, (_, old) => old + reason.Value);
+        }
         return (true, frames.Count);
     }
 
@@ -61,7 +77,7 @@ public sealed class VideoIndexer
         {
             if (mediaSource.Count == 0) continue;
             var info = mediaSource.OrderBy(x => x.Key).First().Value;
-            var samples = await ReadDistinctFramesAsync(video, info, Math.Max(1, maxFrames), cancellationToken).ConfigureAwait(false);
+            var samples = (await ReadDistinctFramesAsync(video, info, Math.Max(1, maxFrames), cancellationToken).ConfigureAwait(false)).Samples;
             foreach (var sample in samples)
             {
                 await _client.EmbedImageAsync(sample.Bytes, cancellationToken).ConfigureAwait(false);
@@ -86,7 +102,7 @@ public sealed class VideoIndexer
         {
             if (mediaSource.Count == 0) continue;
             var info = mediaSource.OrderBy(x => x.Key).First().Value;
-            var samples = await ReadDistinctFramesAsync(video, info, Math.Max(1, maxFrames), cancellationToken).ConfigureAwait(false);
+            var samples = (await ReadDistinctFramesAsync(video, info, Math.Max(1, maxFrames), cancellationToken).ConfigureAwait(false)).Samples;
             foreach (var sample in samples)
             {
                 var frame = sample.FrameIndex;
@@ -105,16 +121,20 @@ public sealed class VideoIndexer
     {
         var titleText = $"Title: {video.Name}\nOriginal title: {video.OriginalTitle}\nFilename: {Path.GetFileName(video.Path)}";
         var previewFrames = new List<ProbePreviewFrame>();
+        var reasons = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
         var manifest = await _trickplay.GetTrickplayManifest(video).ConfigureAwait(false);
         foreach (var mediaSource in manifest.Values)
         {
             if (mediaSource.Count == 0) continue;
             var info = mediaSource.OrderBy(x => x.Key).First().Value;
-            var samples = await ReadDistinctFramesAsync(video, info, Math.Max(1, maxFrames), cancellationToken).ConfigureAwait(false);
+            var read = await ReadDistinctFramesAsync(video, info, Math.Max(1, maxFrames), cancellationToken).ConfigureAwait(false);
+            var samples = read.Samples;
+            foreach (var reason in read.FailureReasons) reasons[reason.Key] = reasons.TryGetValue(reason.Key, out var old) ? old + reason.Value : reason.Value;
             previewFrames.AddRange(samples.Select(sample => new ProbePreviewFrame(sample.FrameIndex, (long)sample.FrameIndex * info.Interval, $"data:image/jpeg;base64,{Convert.ToBase64String(sample.Bytes)}")));
             break;
         }
-        return new ProbePreviewResult(video.Id.ToString(), video.Name, titleText, previewFrames);
+        var reasonText = previewFrames.Count > 0 ? null : reasons.Count == 0 ? "该视频没有 Trickplay 瓦片，请先生成或更换视频" : string.Join("；", reasons.Select(x => $"{x.Key}: {x.Value}"));
+        return new ProbePreviewResult(video.Id.ToString(), video.Name, titleText, previewFrames, reasonText);
     }
 
     private static async Task<byte[]> ReadFrameAsync(string tilePath, int frame, TrickplayInfo info, CancellationToken cancellationToken)
@@ -134,23 +154,45 @@ public sealed class VideoIndexer
         return output.ToArray();
     }
 
-    private async Task<IReadOnlyList<FrameSample>> ReadDistinctFramesAsync(Video video, TrickplayInfo info, int maxFrames, CancellationToken cancellationToken)
+    private async Task<FrameReadResult> ReadDistinctFramesAsync(Video video, TrickplayInfo info, int maxFrames, CancellationToken cancellationToken)
     {
         var estimatedSeconds = Math.Max(1d, info.ThumbnailCount * info.Interval / 1000d);
         var target = (int)Math.Ceiling(estimatedSeconds / 30d);
         var sampleCount = Math.Min(info.ThumbnailCount, Math.Min(Math.Max(1, maxFrames), Math.Max(6, target)));
         var indices = Enumerable.Range(0, sampleCount).Select(i => sampleCount == 1 ? 0 : (int)Math.Round(i * (info.ThumbnailCount - 1d) / (sampleCount - 1))).Distinct().ToList();
         var kept = new List<FrameSample>();
+        var failures = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
+        var saveWithMedia = _library.GetLibraryOptions(video).SaveTrickplayWithMedia;
         foreach (var frame in indices)
         {
             var tileIndex = frame / (info.TileWidth * info.TileHeight);
-            var path = await _trickplay.GetTrickplayTilePathAsync(video, info.Width, tileIndex, false).ConfigureAwait(false);
-            if (!File.Exists(path)) continue;
-            var bytes = await ReadFrameAsync(path, frame, info, cancellationToken).ConfigureAwait(false);
+            var path = await FindTilePathAsync(video, info.Width, tileIndex, saveWithMedia).ConfigureAwait(false);
+            if (path is null)
+            {
+                failures["tile_missing"] = failures.TryGetValue("tile_missing", out var missing) ? missing + 1 : 1;
+                continue;
+            }
+            byte[] bytes;
+            try { bytes = await ReadFrameAsync(path, frame, info, cancellationToken).ConfigureAwait(false); }
+            catch (Exception ex) when (ex is IOException or InvalidDataException or SixLabors.ImageSharp.UnknownImageFormatException)
+            {
+                failures["tile_read_error"] = failures.TryGetValue("tile_read_error", out var readError) ? readError + 1 : 1;
+                continue;
+            }
             if (frame != indices[0] && frame != indices[^1] && kept.Any(x => IsNearDuplicate(x.Bytes, bytes))) continue;
             kept.Add(new FrameSample(frame, bytes));
         }
-        return kept;
+        return new FrameReadResult(kept, failures);
+    }
+
+    private async Task<string?> FindTilePathAsync(Video video, int width, int tileIndex, bool preferredSaveWithMedia)
+    {
+        foreach (var saveWithMedia in new[] { preferredSaveWithMedia, !preferredSaveWithMedia }.Distinct())
+        {
+            var path = await _trickplay.GetTrickplayTilePathAsync(video, width, tileIndex, saveWithMedia).ConfigureAwait(false);
+            if (!string.IsNullOrWhiteSpace(path) && File.Exists(path)) return path;
+        }
+        return null;
     }
 
     private static bool IsNearDuplicate(byte[] first, byte[] second)
@@ -200,10 +242,11 @@ public sealed class VideoIndexer
 }
 
 internal sealed record FrameSample(int FrameIndex, byte[] Bytes);
+internal sealed record FrameReadResult(IReadOnlyList<FrameSample> Samples, IReadOnlyDictionary<string, int> FailureReasons);
 
 public sealed record EmbeddingProbeResult(string ItemId, string Title, bool TextAccepted, int FramesTested, string? Error);
 public sealed record DetailedProbeResult(string ItemId, string Title, string TitleInput, VectorSummary TitleVector, IReadOnlyDictionary<string, double> TitleQueryScores, IReadOnlyList<ProbeFrame> Frames, IReadOnlyList<string> Queries);
-public sealed record ProbePreviewResult(string ItemId, string Title, string TitleInput, IReadOnlyList<ProbePreviewFrame> Frames);
+public sealed record ProbePreviewResult(string ItemId, string Title, string TitleInput, IReadOnlyList<ProbePreviewFrame> Frames, string? Reason);
 public sealed record ProbePreviewFrame(int FrameIndex, long TimestampMs, string ImageDataUrl);
 public sealed record ProbeFrame(int FrameIndex, long TimestampMs, string ImageDataUrl, VectorSummary Vector, IReadOnlyDictionary<string, double> QueryScores);
 public sealed record VectorSummary(int Dimension, double Norm, double Min, double Max, double Mean, IReadOnlyList<double> FirstValues)
