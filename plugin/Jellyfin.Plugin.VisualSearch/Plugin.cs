@@ -47,7 +47,5 @@ public sealed class PluginConfiguration : BasePluginConfiguration
     public bool ScheduledIndexEnabled { get; set; } = false;
     /// <summary>One line per weekday, e.g. 周一 02:00-06:00;22:00-23:30.</summary>
     public string ScheduledIndexWindows { get; set; } = string.Empty;
-    // Kept for configuration compatibility with versions before the weekday schedule.
-    public int ScheduledIndexIntervalMinutes { get; set; } = 360;
     public int IndexRetryDelaySeconds { get; set; } = 15;
 }
