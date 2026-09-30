@@ -16,7 +16,10 @@ public sealed class IndexCoordinator
     private readonly VisualSearchState _state;
     private readonly object _gate = new();
     private CancellationTokenSource? _run;
-    private bool _rebuildRequested;
+    private bool _scheduledRun;
+    private bool _pendingManual;
+    private bool _pendingRebuild;
+    private DateTime? _lastScheduledScanUtc;
 
     public IndexCoordinator(ILibraryManager library, VideoIndexer indexer, VisualSearchState state)
     {
@@ -25,41 +28,51 @@ public sealed class IndexCoordinator
         _state = state;
     }
 
-    public void Start()
-    {
-        lock (_gate)
-        {
-            if (_run is not null) return;
-            _state.Paused = false;
-            _run = new CancellationTokenSource();
-            _ = Task.Run(() => RunAsync(_run.Token));
-        }
-    }
+    /// <summary>Starts a manual incremental run immediately, regardless of schedule windows.</summary>
+    public void Start() => RequestStart(scheduled: false, rebuild: false);
 
-    public void Rebuild()
+    /// <summary>Starts a scheduled incremental run only when the scheduler has entered a window.</summary>
+    public void StartScheduled() => RequestStart(scheduled: true, rebuild: false);
+
+    /// <summary>Starts a manual full rebuild immediately. A scheduled run is cancelled first.</summary>
+    public void Rebuild() => RequestStart(scheduled: false, rebuild: true);
+
+    private void RequestStart(bool scheduled, bool rebuild)
     {
         lock (_gate)
         {
-            _state.ResetIndexCounters();
-            if (_run is not null)
+            if (_run is null)
             {
-                _rebuildRequested = true;
-                _state.Status = "queued_rebuild";
-                _run.Cancel();
+                StartLocked(scheduled, rebuild);
                 return;
             }
 
-            _state.Paused = false;
-            _run = new CancellationTokenSource();
-            _ = Task.Run(() => RunAsync(_run.Token));
+            // A scheduled request never interrupts a manual run or another scheduled run.
+            // Manual requests have priority and cancel a waiting scheduled retry/window.
+            if (scheduled) return;
+            _pendingManual = true;
+            _pendingRebuild |= rebuild;
+            _state.Status = rebuild ? "queued_rebuild" : "queued_manual";
+            _run.Cancel();
         }
+    }
+
+    private void StartLocked(bool scheduled, bool rebuild)
+    {
+        if (rebuild) _state.ResetIndexCounters();
+        _state.Paused = false;
+        _scheduledRun = scheduled;
+        _run = new CancellationTokenSource();
+        var token = _run.Token;
+        _ = Task.Run(() => RunAsync(token, scheduled));
     }
 
     public void Cancel()
     {
         lock (_gate)
         {
-            _rebuildRequested = false;
+            _pendingManual = false;
+            _pendingRebuild = false;
             _run?.Cancel();
             _state.Status = "cancelled";
             _state.Paused = false;
@@ -75,14 +88,15 @@ public sealed class IndexCoordinator
     public void Resume()
     {
         _state.Paused = false;
-        if (_run is not null) _state.Status = "processing";
+        if (_run is not null) _state.Status = _scheduledRun ? "processing_scheduled" : "processing";
     }
 
-    private async Task RunAsync(CancellationToken cancellationToken)
+    private async Task RunAsync(CancellationToken cancellationToken, bool scheduled)
     {
         try
         {
-            _state.Status = "processing";
+            _state.Status = scheduled ? "processing_scheduled" : "processing";
+            var scheduledSince = scheduled ? _lastScheduledScanUtc : null;
             var videos = _library.GetItemList(new InternalItemsQuery
             {
                 MediaTypes = new[] { MediaType.Video },
@@ -90,28 +104,35 @@ public sealed class IndexCoordinator
                 IsFolder = false,
                 Recursive = true
             }).OfType<Video>().ToList();
+
+            // The first scheduled scan covers the current library. Later scheduled scans
+            // only pick up items changed since the last completed scheduled scan.
+            if (scheduledSince.HasValue)
+                videos = videos.Where(x => x.DateModified > scheduledSince.Value).ToList();
+
             _state.QueueTotal = videos.Count;
+            _state.QueueCompleted = 0;
             _state.PendingVideos = videos.Count;
 
             foreach (var video in videos)
             {
                 cancellationToken.ThrowIfCancellationRequested();
+                if (scheduled) await WaitForScheduleWindowAsync(cancellationToken).ConfigureAwait(false);
                 await WaitIfPausedAsync(cancellationToken).ConfigureAwait(false);
                 _state.CurrentItemId = video.Id.ToString();
 
                 var indexed = await IndexWithRetryAsync(video, cancellationToken).ConfigureAwait(false);
-                if (indexed)
-                {
-                    _state.IndexedVideos++;
-                }
+                if (indexed) _state.IndexedVideos++;
                 _state.QueueCompleted++;
                 _state.PendingVideos = Math.Max(0, _state.PendingVideos - 1);
             }
+
+            if (scheduled) _lastScheduledScanUtc = DateTime.UtcNow;
             _state.Status = "ready";
         }
         catch (OperationCanceledException)
         {
-            if (_state.Status != "queued_rebuild") _state.Status = "cancelled";
+            if (_state.Status is not ("queued_rebuild" or "queued_manual")) _state.Status = "cancelled";
         }
         catch (Exception ex)
         {
@@ -120,15 +141,20 @@ public sealed class IndexCoordinator
         }
         finally
         {
-            bool restart;
             lock (_gate)
             {
                 _run?.Dispose();
                 _run = null;
-                restart = _rebuildRequested;
-                _rebuildRequested = false;
+                _scheduledRun = false;
+
+                if (_pendingManual)
+                {
+                    var rebuild = _pendingRebuild;
+                    _pendingManual = false;
+                    _pendingRebuild = false;
+                    StartLocked(scheduled: false, rebuild: rebuild);
+                }
             }
-            if (restart) Rebuild();
         }
     }
 
@@ -142,6 +168,7 @@ public sealed class IndexCoordinator
             {
                 await _indexer.IndexAsync(video, string.Empty, cancellationToken).ConfigureAwait(false);
                 _state.RecordError(string.Empty);
+                _state.QueueWaiting = 0;
                 return true;
             }
             catch (Exception ex) when (VisualSearchClient.IsRetryable(ex))
@@ -154,6 +181,7 @@ public sealed class IndexCoordinator
                 var delay = TimeSpan.FromSeconds(Math.Min(300, retryDelay * Math.Pow(2, Math.Min(attempt - 1, 5))));
                 await Task.Delay(delay, cancellationToken).ConfigureAwait(false);
                 _state.QueueWaiting = 0;
+                if (_scheduledRun) await WaitForScheduleWindowAsync(cancellationToken).ConfigureAwait(false);
                 await WaitIfPausedAsync(cancellationToken).ConfigureAwait(false);
             }
             catch (Exception ex)
@@ -164,6 +192,20 @@ public sealed class IndexCoordinator
                 _state.QueueFailureReasons.AddOrUpdate("index_permanent_error", 1, (_, old) => old + 1);
                 return false;
             }
+        }
+    }
+
+    private async Task WaitForScheduleWindowAsync(CancellationToken cancellationToken)
+    {
+        while (true)
+        {
+            var configuration = Plugin.Instance?.Configuration;
+            var windows = IndexSchedule.Parse(configuration?.ScheduledIndexWindows);
+            if (configuration?.ScheduledIndexEnabled == true && IndexSchedule.FindActive(DateTime.Now, windows) is not null)
+                return;
+            _state.Status = "waiting_schedule";
+            _state.QueueWaiting = 0;
+            await Task.Delay(TimeSpan.FromSeconds(20), cancellationToken).ConfigureAwait(false);
         }
     }
 
