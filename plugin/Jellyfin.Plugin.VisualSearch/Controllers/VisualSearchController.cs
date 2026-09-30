@@ -148,7 +148,7 @@ public sealed class VisualSearchController : ControllerBase
             });
             var ordered = preset.SortBy.ToLowerInvariant() switch
             {
-                "visual" => candidates.OrderByDescending(x => x.visual ?? -1).ThenByDescending(x => x.final),
+                "visual" => candidates.OrderByDescending(x => x.visualScore ?? -1).ThenByDescending(x => x.final),
                 "title" => candidates.OrderByDescending(x => x.title ?? -1).ThenByDescending(x => x.final),
                 "timestamp" => candidates.OrderBy(x => x.frame?.TimestampMs ?? long.MaxValue).ThenByDescending(x => x.final),
                 "title-asc" => candidates.OrderBy(x => x.itemId, StringComparer.OrdinalIgnoreCase),
