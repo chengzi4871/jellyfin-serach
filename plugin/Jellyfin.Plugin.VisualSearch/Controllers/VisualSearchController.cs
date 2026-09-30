@@ -10,6 +10,7 @@ using MediaBrowser.Controller.Library;
 using MediaBrowser.Controller.Trickplay;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
+using Microsoft.Extensions.Logging;
 
 namespace Jellyfin.Plugin.VisualSearch.Controllers;
 
@@ -24,8 +25,9 @@ public sealed class VisualSearchController : ControllerBase
     private readonly VideoIndexer _indexer;
     private readonly IndexCoordinator _coordinator;
     private readonly ITrickplayManager _trickplay;
+    private readonly ILogger<VisualSearchController> _logger;
 
-    public VisualSearchController(VisualSearchState state, VisualSearchClient client, ILibraryManager libraryManager, VideoIndexer indexer, IndexCoordinator coordinator, ITrickplayManager trickplay)
+    public VisualSearchController(VisualSearchState state, VisualSearchClient client, ILibraryManager libraryManager, VideoIndexer indexer, IndexCoordinator coordinator, ITrickplayManager trickplay, ILogger<VisualSearchController> logger)
     {
         _state = state;
         _client = client;
@@ -33,6 +35,7 @@ public sealed class VisualSearchController : ControllerBase
         _indexer = indexer;
         _coordinator = coordinator;
         _trickplay = trickplay;
+        _logger = logger;
     }
 
     [HttpGet("Health")]
@@ -126,13 +129,27 @@ public sealed class VisualSearchController : ControllerBase
         {
             return StatusCode(504, new { status = "timeout", stage = "search", message = ex.Message });
         }
-        catch (Exception ex) when (ex is InvalidOperationException or InvalidDataException)
+        catch (VisualSearchConfigurationException ex)
         {
             return BadRequest(new { status = "error", stage = "configuration", message = ex.Message });
         }
         catch (HttpRequestException ex)
         {
+            _logger.LogWarning(ex, "Visual search remote request failed for query {Query}", request.Query);
             return StatusCode(503, new { status = "error", stage = ex.Message.Contains("Qdrant", StringComparison.OrdinalIgnoreCase) ? "qdrant" : "cloud", message = ex.Message });
+        }
+        catch (InvalidDataException ex)
+        {
+            _logger.LogError(ex, "Visual search provider returned invalid data for query {Query}", request.Query);
+            return StatusCode(502, new { status = "error", stage = "cloud", message = ex.Message });
+        }
+        catch (Exception ex)
+        {
+            // Internal defects (including disposed JSON backing documents) are
+            // server errors, never user configuration errors. Keep the full
+            // exception and stack trace in Jellyfin logs for diagnosis.
+            _logger.LogError(ex, "Visual search failed for query {Query}", request.Query);
+            return StatusCode(500, new { status = "error", stage = "search", message = ex.Message });
         }
     }
 
@@ -147,7 +164,7 @@ public sealed class VisualSearchController : ControllerBase
             await _client.EnsureCollectionsAsync(cancellationToken).ConfigureAwait(false);
             return Ok(new { status = "ready" });
         }
-        catch (InvalidOperationException ex)
+        catch (VisualSearchConfigurationException ex)
         {
             return BadRequest(new { status = "error", stage = "qdrant", message = ex.Message });
         }
@@ -193,7 +210,7 @@ public sealed class VisualSearchController : ControllerBase
             return Ok(new { itemId = video.Id, textIndexed = indexed.Text, framesIndexed = indexed.Frames });
         }
         catch (TaskCanceledException ex) { return StatusCode(504, new { status = "timeout", stage = "index", message = ex.Message }); }
-        catch (Exception ex) when (ex is InvalidOperationException or InvalidDataException) { return BadRequest(new { status = "error", stage = "configuration", message = ex.Message }); }
+        catch (VisualSearchConfigurationException ex) { return BadRequest(new { status = "error", stage = "configuration", message = ex.Message }); }
         catch (HttpRequestException ex) { return StatusCode(503, new { status = "error", stage = "embedding", message = ex.Message }); }
     }
 
