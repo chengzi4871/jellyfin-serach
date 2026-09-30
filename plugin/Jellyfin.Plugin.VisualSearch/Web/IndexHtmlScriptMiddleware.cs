@@ -16,8 +16,11 @@ public sealed class IndexHtmlScriptMiddleware
 
     public async Task InvokeAsync(HttpContext context)
     {
-        if (!HttpMethods.IsGet(context.Request.Method) || !IsIndex(context.Request.Path.Value))
+        if (!HttpMethods.IsGet(context.Request.Method) || !IsIndex(context.Request.Path.Value)
+            || context.Request.Headers.ContainsKey(HeaderNames.IfNoneMatch)
+            || context.Request.Headers.ContainsKey(HeaderNames.IfModifiedSince))
         {
+            // Conditional requests must flow through unchanged so a 304 never gets a body.
             await _next(context).ConfigureAwait(false);
             return;
         }
@@ -28,7 +31,9 @@ public sealed class IndexHtmlScriptMiddleware
         try { await _next(context).ConfigureAwait(false); }
         finally { context.Response.Body = original; }
         var bytes = buffer.ToArray();
-        if (context.Response.StatusCode == 200 && context.Response.ContentType?.StartsWith("text/html", StringComparison.OrdinalIgnoreCase) == true)
+        var rewritten = false;
+        if (context.Response.StatusCode == StatusCodes.Status200OK
+            && context.Response.ContentType?.StartsWith("text/html", StringComparison.OrdinalIgnoreCase) == true)
         {
             var html = Encoding.UTF8.GetString(bytes);
             if (!html.Contains(Marker, StringComparison.OrdinalIgnoreCase))
@@ -38,9 +43,21 @@ public sealed class IndexHtmlScriptMiddleware
                 bytes = Encoding.UTF8.GetBytes(html);
                 context.Response.Headers.Remove(HeaderNames.ETag);
                 context.Response.ContentLength = bytes.Length;
+                rewritten = true;
             }
         }
-        await original.WriteAsync(bytes, context.RequestAborted).ConfigureAwait(false);
+
+        // 304 (and other bodyless responses) must not receive a response body. For an
+        // ordinary non-rewritten response, preserve the buffered body exactly as the
+        // downstream middleware produced it.
+        if (context.Response.StatusCode == StatusCodes.Status304NotModified
+            || context.Response.StatusCode == StatusCodes.Status204NoContent)
+        {
+            return;
+        }
+
+        if (rewritten || bytes.Length > 0)
+            await original.WriteAsync(bytes, context.RequestAborted).ConfigureAwait(false);
     }
 
     private static bool IsIndex(string? path) => !string.IsNullOrEmpty(path)
