@@ -37,11 +37,12 @@ public sealed class VideoIndexer
         _state.SetStage("embedding_title", 0, 1, 1);
         _state.PlanEmbeddingInputs(1);
         var titleVector = await _client.EmbedTextAsync(text, cancellationToken).ConfigureAwait(false);
+        _state.RecordEmbeddingInputs(1);
+        _state.SetStage("saving_title", 1, 1, 1);
         await _client.UpsertAsync("jellyfin_video_text", new[]
         {
             new { id = video.Id.ToString(), vector = titleVector, payload = new { itemId = video.Id.ToString(), libraryId, textHash = text.GetHashCode().ToString() } }
         }, cancellationToken).ConfigureAwait(false);
-        _state.RecordEmbeddingInputs(1);
 
         _state.SetStage("reading_frames", 0, 0, 0);
         var frameSamples = new List<(FrameSample Sample, int Interval)>();
@@ -53,7 +54,11 @@ public sealed class VideoIndexer
             var info = mediaSource.OrderBy(x => x.Key).First().Value;
             var read = await ReadDistinctFramesAsync(video, info, configuration.GetEffectiveMaxFramesPerVideo(), cancellationToken).ConfigureAwait(false);
             foreach (var reason in read.FailureReasons) frameFailureReasons[reason.Key] = frameFailureReasons.TryGetValue(reason.Key, out var old) ? old + reason.Value : reason.Value;
+            _state.CurrentFramesSampled = read.SampledCount;
+            _state.CurrentFramesDeduplicated = read.DeduplicatedCount;
             frameSamples.AddRange(read.Samples.Select(sample => (sample, info.Interval)));
+            // Match Preview/Inspect: one media source, one per-video frame cap.
+            break;
         }
 
         var images = frameSamples.Select(x => x.Sample.Bytes).ToArray();
@@ -67,6 +72,7 @@ public sealed class VideoIndexer
             var sample = frameSamples[i].Sample;
             frames.Add(new { id = DeterministicId(video.Id, sample.FrameIndex), vector = imageVectors[i], payload = new { itemId = video.Id.ToString(), libraryId, frameIndex = sample.FrameIndex, timestampMs = (long)sample.FrameIndex * frameSamples[i].Interval } });
         }
+        _state.SetStage("saving_frames", totalBatches, totalBatches, 0);
         if (frames.Count > 0) await _client.UpsertAsync("jellyfin_video_frames", frames, cancellationToken).ConfigureAwait(false);
         if (frames.Count > 0) _state.RecordFrameSuccess(frames.Count);
         else
@@ -176,6 +182,9 @@ public sealed class VideoIndexer
         var sampleCount = Math.Min(info.ThumbnailCount, Math.Min(Math.Max(1, maxFrames), Math.Max(6, target)));
         var indices = Enumerable.Range(0, sampleCount).Select(i => sampleCount == 1 ? 0 : (int)Math.Round(i * (info.ThumbnailCount - 1d) / (sampleCount - 1))).Distinct().ToList();
         var kept = new List<FrameSample>();
+        var fingerprints = new List<FrameFingerprint>();
+        var deduplicatedCount = 0;
+        var deduplicate = Plugin.Instance?.Configuration.FrameDeduplicationEnabled != false;
         var failures = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
         var saveWithMedia = _library.GetLibraryOptions(video).SaveTrickplayWithMedia;
         foreach (var frame in indices)
@@ -194,10 +203,19 @@ public sealed class VideoIndexer
                 failures["tile_read_error"] = failures.TryGetValue("tile_read_error", out var readError) ? readError + 1 : 1;
                 continue;
             }
-            if (Plugin.Instance?.Configuration.FrameDeduplicationEnabled != false && frame != indices[0] && frame != indices[^1] && kept.Any(x => IsNearDuplicate(x.Bytes, bytes))) continue;
+            if (deduplicate)
+            {
+                var fingerprint = Fingerprint(bytes);
+                if (frame != indices[0] && frame != indices[^1] && fingerprints.Any(previous => IsNearDuplicate(previous, fingerprint)))
+                {
+                    deduplicatedCount++;
+                    continue;
+                }
+                fingerprints.Add(fingerprint);
+            }
             kept.Add(new FrameSample(frame, bytes));
         }
-        return new FrameReadResult(kept, failures);
+        return new FrameReadResult(kept, failures, indices.Count, deduplicatedCount);
     }
 
     private async Task<string?> FindTilePathAsync(Video video, int width, int tileIndex, bool preferredSaveWithMedia)
@@ -210,35 +228,31 @@ public sealed class VideoIndexer
         return null;
     }
 
-    private static bool IsNearDuplicate(byte[] first, byte[] second)
+    // Decode each sampled JPEG once; comparisons use only 64-bit hashes and 8x8 colors.
+    private static FrameFingerprint Fingerprint(byte[] bytes)
     {
-        using var a = Image.Load<Rgba32>(first);
-        using var b = Image.Load<Rgba32>(second);
-        var colorDistance = AverageColorDistance(a, b);
-        if (colorDistance > 18) return false;
-        a.Mutate(x => x.Resize(9, 8).Grayscale());
-        b.Mutate(x => x.Resize(9, 8).Grayscale());
-        ulong ha = 0, hb = 0;
+        using var image = Image.Load<Rgba32>(bytes);
+        image.Mutate(x => x.Resize(8, 8));
+        var colors = new byte[8 * 8 * 3];
         for (var y = 0; y < 8; y++) for (var x = 0; x < 8; x++)
         {
-            if (a[x, y].R > a[x + 1, y].R) ha |= 1UL << (y * 8 + x);
-            if (b[x, y].R > b[x + 1, y].R) hb |= 1UL << (y * 8 + x);
+            var offset = (y * 8 + x) * 3;
+            colors[offset] = image[x, y].R;
+            colors[offset + 1] = image[x, y].G;
+            colors[offset + 2] = image[x, y].B;
         }
-        var distance = System.Numerics.BitOperations.PopCount(ha ^ hb);
-        return distance <= 5;
+        image.Mutate(x => x.Resize(9, 8).Grayscale());
+        ulong hash = 0;
+        for (var y = 0; y < 8; y++) for (var x = 0; x < 8; x++)
+            if (image[x, y].R > image[x + 1, y].R) hash |= 1UL << (y * 8 + x);
+        return new FrameFingerprint(hash, colors);
     }
 
-    private static double AverageColorDistance(Image<Rgba32> first, Image<Rgba32> second)
+    private static bool IsNearDuplicate(FrameFingerprint first, FrameFingerprint second)
     {
-        first.Mutate(x => x.Resize(8, 8));
-        second.Mutate(x => x.Resize(8, 8));
-        double total = 0;
-        for (var y = 0; y < 8; y++) for (var x = 0; x < 8; x++)
-        {
-            var p = first[x, y]; var q = second[x, y];
-            total += (Math.Abs(p.R - q.R) + Math.Abs(p.G - q.G) + Math.Abs(p.B - q.B)) / 3d;
-        }
-        return total / 64d;
+        if (System.Numerics.BitOperations.PopCount(first.Hash ^ second.Hash) > 5) return false;
+        var colorDistance = first.Colors.Zip(second.Colors, (a, b) => Math.Abs(a - b)).Average();
+        return colorDistance <= 18;
     }
 
     private static double Cosine(IReadOnlyList<float> a, IReadOnlyList<float> b)
@@ -257,7 +271,8 @@ public sealed class VideoIndexer
 }
 
 internal sealed record FrameSample(int FrameIndex, byte[] Bytes);
-internal sealed record FrameReadResult(IReadOnlyList<FrameSample> Samples, IReadOnlyDictionary<string, int> FailureReasons);
+internal sealed record FrameFingerprint(ulong Hash, byte[] Colors);
+internal sealed record FrameReadResult(IReadOnlyList<FrameSample> Samples, IReadOnlyDictionary<string, int> FailureReasons, int SampledCount, int DeduplicatedCount);
 
 public sealed record EmbeddingProbeResult(string ItemId, string Title, bool TextAccepted, int FramesTested, string? Error);
 public sealed record DetailedProbeResult(string ItemId, string Title, string TitleInput, VectorSummary TitleVector, IReadOnlyDictionary<string, double> TitleQueryScores, IReadOnlyList<ProbeFrame> Frames, IReadOnlyList<string> Queries);
