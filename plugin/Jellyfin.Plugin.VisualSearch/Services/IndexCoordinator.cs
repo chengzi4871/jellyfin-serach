@@ -61,13 +61,14 @@ public sealed class IndexCoordinator
             _pendingManual = true;
             _pendingRebuild |= rebuild;
             _state.Status = rebuild ? "queued_rebuild" : "queued_manual";
+            _state.Stage = _state.Status;
             _run.Cancel();
         }
     }
 
     private void StartLocked(bool scheduled, bool rebuild)
     {
-        if (rebuild) _state.ResetIndexCounters();
+        _state.BeginRun(scheduled ? "scheduled_incremental" : rebuild ? "manual_rebuild" : "manual_incremental", rebuild);
         _state.Paused = false;
         _scheduledRun = scheduled;
         _run = new CancellationTokenSource();
@@ -118,24 +119,22 @@ public sealed class IndexCoordinator
             if (scheduledSince.HasValue)
                 videos = videos.Where(x => x.DateModified > scheduledSince.Value).ToList();
 
-            _state.QueueTotal = videos.Count;
-            _state.QueueCompleted = 0;
-            _state.PendingVideos = videos.Count;
+            _state.SetQueue(videos.Count);
 
-            foreach (var video in videos)
+            for (var index = 0; index < videos.Count; index++)
             {
+                var video = videos[index];
                 cancellationToken.ThrowIfCancellationRequested();
                 if (scheduled) await WaitForScheduleWindowAsync(cancellationToken).ConfigureAwait(false);
                 await WaitIfPausedAsync(cancellationToken).ConfigureAwait(false);
-                _state.CurrentItemId = video.Id.ToString();
+                _state.SetVideo(index + 1, videos.Count, video.Id.ToString(), video.Name);
 
                 var indexed = await IndexWithRetryAsync(video, cancellationToken).ConfigureAwait(false);
-                if (indexed) _state.IndexedVideos++;
-                _state.QueueCompleted++;
-                _state.PendingVideos = Math.Max(0, _state.PendingVideos - 1);
+                _state.RecordVideoCompleted(indexed);
             }
 
             if (scheduled) _lastScheduledScanUtc = DateTime.UtcNow;
+            _state.Stage = "completed";
             _state.Status = "ready";
         }
         catch (OperationCanceledException)
@@ -145,6 +144,7 @@ public sealed class IndexCoordinator
         catch (Exception ex)
         {
             _state.RecordError(ex.Message);
+            _state.Stage = "error";
             _state.Status = "error";
         }
         finally
@@ -185,6 +185,7 @@ public sealed class IndexCoordinator
                 _state.RetryCount++;
                 _state.QueueWaiting = 1;
                 _state.Status = "waiting_retry";
+                _state.Stage = "waiting_retry";
                 _state.RecordError($"{video.Name}: retry {attempt}; {ex.Message}");
                 var delay = TimeSpan.FromSeconds(Math.Min(300, retryDelay * Math.Pow(2, Math.Min(attempt - 1, 5))));
                 await Task.Delay(delay, cancellationToken).ConfigureAwait(false);
@@ -212,6 +213,7 @@ public sealed class IndexCoordinator
             if (configuration?.ScheduledIndexEnabled == true && IndexSchedule.FindActive(DateTime.Now, windows) is not null)
                 return;
             _state.Status = "waiting_schedule";
+            _state.Stage = "waiting_schedule";
             _state.QueueWaiting = 0;
             await Task.Delay(TimeSpan.FromSeconds(20), cancellationToken).ConfigureAwait(false);
         }
@@ -222,6 +224,7 @@ public sealed class IndexCoordinator
         while (_state.Paused)
         {
             _state.Status = "paused";
+            _state.Stage = "paused";
             await Task.Delay(500, cancellationToken).ConfigureAwait(false);
         }
     }
