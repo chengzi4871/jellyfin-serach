@@ -25,6 +25,7 @@ jobs:
         with:
           dotnet-version: '9.0.x'
       - run: dotnet build plugin/Jellyfin.Plugin.VisualSearch/Jellyfin.Plugin.VisualSearch.csproj --configuration Release
+      - run: dotnet test plugin/Jellyfin.Plugin.VisualSearch.Tests/Jellyfin.Plugin.VisualSearch.Tests.csproj --configuration Release
       - run: dotnet publish plugin/Jellyfin.Plugin.VisualSearch/Jellyfin.Plugin.VisualSearch.csproj --configuration Release --output publish
       - name: Verify plugin dependencies
         run: |
