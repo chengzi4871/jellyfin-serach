@@ -222,7 +222,7 @@ public sealed class VisualSearchClient
         if (value is null && body.TryGetProperty("embedding", out var direct)) value = direct;
         if (value is null && body.TryGetProperty("vector", out var vector)) value = vector;
         if (value is null || value.Value.ValueKind != JsonValueKind.Array)
-            throw new InvalidDataException($"Embedding response does not contain a vector array. Actual value type: {value?.Value.ValueKind.ToString() ?? "missing"}. Response: {Truncate(body.GetRawText())}");
+            throw new InvalidDataException($"Embedding response does not contain a vector array. Actual value type: {(value.HasValue ? value.Value.ValueKind.ToString() : "missing")}. Response: {Truncate(body.GetRawText())}");
         var result = new float[value.Value.GetArrayLength()]; var i = 0;
         foreach (var item in value.Value.EnumerateArray())
         {
