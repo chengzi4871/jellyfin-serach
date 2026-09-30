@@ -103,8 +103,8 @@ public sealed class IndexCoordinator
                 if (indexed)
                 {
                     _state.IndexedVideos++;
-                    _state.QueueCompleted++;
                 }
+                _state.QueueCompleted++;
                 _state.PendingVideos = Math.Max(0, _state.PendingVideos - 1);
             }
             _state.Status = "ready";
