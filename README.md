@@ -10,7 +10,7 @@ Jellyfin 插件 ── HTTP/HTTPS ── 云端多模态 Embedding API
        └──────────── HTTP ──── Qdrant（Ubuntu）
 ```
 
-所有运行配置都在 Jellyfin 的 Visual Search 页面填写：Embedding Base URL、模型、API Key、协议、输入格式、向量维度、超时、图片最大尺寸、Embedding batch size、Qdrant URL、索引权重和调度参数。batch size 默认 32，表示一次 HTTP Embedding 请求最多发送多少个文本或图片输入。定时增量索引使用“星期 + 时段表”，例如 `周一 02:00-06:00;22:00-23:30`，每行一个星期；时段外发现的新视频或变更会等待下一个时段，手动索引不受限制。Docker 中两个地址都不能默认使用 `127.0.0.1`，除非目标服务与 Jellyfin 在同一容器。`auto` 输入格式优先发送 `[{"text":"..."}]` 或 `[{"image":"data:..."}]`，遇到 HTTP 400 会依次尝试纯字符串和 OpenAI `type/image_url` 形状；`EmbeddingDimension > 0` 时请求会带 `dimensions`。云端 API 必须让文本和图片处于同一个向量空间；只有纯文本 `/v1/embeddings` 的服务不能用于视觉检索。
+所有运行配置都在 Jellyfin 的 Visual Search 页面填写：Embedding Base URL、模型、API Key、协议、输入格式、向量维度、超时、图片最大尺寸、Embedding batch size、Qdrant URL、索引权重和调度参数。batch size 默认 32，表示一次 HTTP Embedding 请求最多发送多少个文本或图片输入。图片索引采用有界双缓冲：当前批次等待云端返回时，本机在后台准备下一批图片；云端返回后按原顺序立即发送已准备批次。整个过程最多只有一个远端请求在途，并且只预取一批，避免无限并发和内存增长。定时增量索引使用“星期 + 时段表”，例如 `周一 02:00-06:00;22:00-23:30`，每行一个星期；时段外发现的新视频或变更会等待下一个时段，手动索引不受限制。Docker 中两个地址都不能默认使用 `127.0.0.1`，除非目标服务与 Jellyfin 在同一容器。`auto` 输入格式优先发送 `[{"text":"..."}]` 或 `[{"image":"data:..."}]`，遇到 HTTP 400 会依次尝试纯字符串和 OpenAI `type/image_url` 形状；`EmbeddingDimension > 0` 时请求会带 `dimensions`。云端 API 必须让文本和图片处于同一个向量空间；只有纯文本 `/v1/embeddings` 的服务不能用于视觉检索。
 
 API Key 不会出现在健康检查返回值或普通日志中，但会保存在 Jellyfin 插件配置中，请限制配置目录的访问权限。
 

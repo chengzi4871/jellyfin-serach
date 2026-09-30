@@ -121,12 +121,15 @@ public sealed class VisualSearchClient
     public async Task<IReadOnlyList<float[]>> EmbedImagesAsync(IReadOnlyList<byte[]> images, CancellationToken cancellationToken, Action<int, int, int>? batchProgress = null)
     {
         if (images.Count == 0) return Array.Empty<float[]>();
-        var values = images.Select(image =>
-        {
-            var prepared = PrepareImage(image);
-            return $"data:{DetectMime(prepared)};base64,{Convert.ToBase64String(prepared)}";
-        }).ToArray();
-        return await EmbedBatchedAsync(values, "image", cancellationToken, batchProgress).ConfigureAwait(false);
+        // Keep raw frames until their batch is needed. EmbedBatchedAsync uses a
+        // one-batch look-ahead, so image resizing/JPEG encoding for the next batch
+        // runs while the current HTTP request is in flight.
+        return await EmbedBatchedAsync(
+            images.Count,
+            "image",
+            (offset, count, token) => PrepareImageBatchAsync(images, offset, count, token),
+            cancellationToken,
+            batchProgress).ConfigureAwait(false);
     }
 
     private async Task<float[]> EmbedSingleAsync(string value, string kind, CancellationToken cancellationToken)
@@ -144,19 +147,93 @@ public sealed class VisualSearchClient
 
     private async Task<IReadOnlyList<float[]>> EmbedBatchedAsync(IReadOnlyList<string> values, string kind, CancellationToken cancellationToken, Action<int, int, int>? batchProgress)
     {
+        return await EmbedBatchedAsync(
+            values.Count,
+            kind,
+            (offset, count, _) => Task.FromResult<IReadOnlyList<string>>(values.Skip(offset).Take(count).ToArray()),
+            cancellationToken,
+            batchProgress).ConfigureAwait(false);
+    }
+
+    /// <summary>
+    /// Sends embedding batches in order while preparing at most one following
+    /// batch in advance. There is still only one remote request in flight, but
+    /// local preparation can overlap the current network/model request.
+    /// </summary>
+    private async Task<IReadOnlyList<float[]>> EmbedBatchedAsync(
+        int valueCount,
+        string kind,
+        Func<int, int, CancellationToken, Task<IReadOnlyList<string>>> prepareBatch,
+        CancellationToken cancellationToken,
+        Action<int, int, int>? batchProgress)
+    {
+        if (valueCount == 0) return Array.Empty<float[]>();
+
         var batchSize = Math.Clamp(_configurationProvider().EmbeddingBatchSize, 1, 256);
-        var vectors = new List<float[]>(values.Count);
-        var totalBatches = (int)Math.Ceiling(values.Count / (double)batchSize);
-        var batchIndex = 0;
-        for (var offset = 0; offset < values.Count; offset += batchSize)
+        var totalBatches = (int)Math.Ceiling(valueCount / (double)batchSize);
+        var vectors = new List<float[]>(valueCount);
+        var nextPrepared = prepareBatch(0, Math.Min(batchSize, valueCount), cancellationToken);
+
+        for (var batchIndex = 0; batchIndex < totalBatches; batchIndex++)
         {
-            var count = Math.Min(batchSize, values.Count - offset);
-            var batch = values.Skip(offset).Take(count).ToArray();
-            vectors.AddRange(await EmbedBatchRequestAsync(batch, kind, cancellationToken).ConfigureAwait(false));
-            batchIndex++;
-            batchProgress?.Invoke(batchIndex, totalBatches, count);
+            var offset = batchIndex * batchSize;
+            var count = Math.Min(batchSize, valueCount - offset);
+            var batch = await nextPrepared.ConfigureAwait(false);
+            cancellationToken.ThrowIfCancellationRequested();
+            Task<IReadOnlyList<string>>? followingPrepared = null;
+            if (batchIndex + 1 < totalBatches)
+            {
+                var followingOffset = offset + batchSize;
+                var followingCount = Math.Min(batchSize, valueCount - followingOffset);
+                // Start preparing the following batch before awaiting the current
+                // remote request. The bounded look-ahead avoids unbounded memory
+                // growth and preserves request ordering/backpressure.
+                followingPrepared = prepareBatch(followingOffset, followingCount, cancellationToken);
+            }
+
+            try
+            {
+                vectors.AddRange(await EmbedBatchRequestAsync(batch, kind, cancellationToken).ConfigureAwait(false));
+                batchProgress?.Invoke(batchIndex + 1, totalBatches, count);
+            }
+            catch
+            {
+                // Observe a look-ahead failure before propagating the request
+                // failure; this prevents an unobserved preparation exception.
+                await ObservePreparationAsync(followingPrepared).ConfigureAwait(false);
+                throw;
+            }
+
+            nextPrepared = followingPrepared ?? Task.FromResult<IReadOnlyList<string>>(Array.Empty<string>());
         }
+
         return vectors;
+    }
+
+    private static async Task ObservePreparationAsync(Task<IReadOnlyList<string>>? preparation)
+    {
+        if (preparation is null) return;
+        try { await preparation.ConfigureAwait(false); }
+        catch { /* the active request/callback failure remains authoritative */ }
+    }
+
+    private static Task<IReadOnlyList<string>> PrepareImageBatchAsync(
+        IReadOnlyList<byte[]> images,
+        int offset,
+        int count,
+        CancellationToken cancellationToken)
+    {
+        return Task.Run<IReadOnlyList<string>>(() =>
+        {
+            var values = new string[count];
+            for (var index = 0; index < count; index++)
+            {
+                cancellationToken.ThrowIfCancellationRequested();
+                var prepared = PrepareImage(images[offset + index]);
+                values[index] = $"data:{DetectMime(prepared)};base64,{Convert.ToBase64String(prepared)}";
+            }
+            return values;
+        }, cancellationToken);
     }
 
     public static bool IsRetryable(Exception exception)
