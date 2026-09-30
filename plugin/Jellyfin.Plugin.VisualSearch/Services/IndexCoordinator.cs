@@ -32,7 +32,15 @@ public sealed class IndexCoordinator
     public void Start() => RequestStart(scheduled: false, rebuild: false);
 
     /// <summary>Starts a scheduled incremental run only when the scheduler has entered a window.</summary>
-    public void StartScheduled() => RequestStart(scheduled: true, rebuild: false);
+    public bool StartScheduled()
+    {
+        lock (_gate)
+        {
+            if (_run is not null) return false;
+            StartLocked(scheduled: true, rebuild: false);
+            return true;
+        }
+    }
 
     /// <summary>Starts a manual full rebuild immediately. A scheduled run is cancelled first.</summary>
     public void Rebuild() => RequestStart(scheduled: false, rebuild: true);
