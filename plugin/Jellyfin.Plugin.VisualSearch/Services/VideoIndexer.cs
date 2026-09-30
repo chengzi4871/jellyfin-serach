@@ -101,6 +101,22 @@ public sealed class VideoIndexer
         return new DetailedProbeResult(video.Id.ToString(), video.Name, titleText, VectorSummary.From(titleVector), titleScores, frames, queryVectors.Keys.ToArray());
     }
 
+    public async Task<ProbePreviewResult> PreviewAsync(Video video, int maxFrames, CancellationToken cancellationToken)
+    {
+        var titleText = $"Title: {video.Name}\nOriginal title: {video.OriginalTitle}\nFilename: {Path.GetFileName(video.Path)}";
+        var previewFrames = new List<ProbePreviewFrame>();
+        var manifest = await _trickplay.GetTrickplayManifest(video).ConfigureAwait(false);
+        foreach (var mediaSource in manifest.Values)
+        {
+            if (mediaSource.Count == 0) continue;
+            var info = mediaSource.OrderBy(x => x.Key).First().Value;
+            var samples = await ReadDistinctFramesAsync(video, info, Math.Max(1, maxFrames), cancellationToken).ConfigureAwait(false);
+            previewFrames.AddRange(samples.Select(sample => new ProbePreviewFrame(sample.FrameIndex, (long)sample.FrameIndex * info.Interval, $"data:image/jpeg;base64,{Convert.ToBase64String(sample.Bytes)}")));
+            break;
+        }
+        return new ProbePreviewResult(video.Id.ToString(), video.Name, titleText, previewFrames);
+    }
+
     private static async Task<byte[]> ReadFrameAsync(string tilePath, int frame, TrickplayInfo info, CancellationToken cancellationToken)
     {
         await using var input = File.OpenRead(tilePath);
@@ -187,6 +203,8 @@ internal sealed record FrameSample(int FrameIndex, byte[] Bytes);
 
 public sealed record EmbeddingProbeResult(string ItemId, string Title, bool TextAccepted, int FramesTested, string? Error);
 public sealed record DetailedProbeResult(string ItemId, string Title, string TitleInput, VectorSummary TitleVector, IReadOnlyDictionary<string, double> TitleQueryScores, IReadOnlyList<ProbeFrame> Frames, IReadOnlyList<string> Queries);
+public sealed record ProbePreviewResult(string ItemId, string Title, string TitleInput, IReadOnlyList<ProbePreviewFrame> Frames);
+public sealed record ProbePreviewFrame(int FrameIndex, long TimestampMs, string ImageDataUrl);
 public sealed record ProbeFrame(int FrameIndex, long TimestampMs, string ImageDataUrl, VectorSummary Vector, IReadOnlyDictionary<string, double> QueryScores);
 public sealed record VectorSummary(int Dimension, double Norm, double Min, double Max, double Mean, IReadOnlyList<double> FirstValues)
 {
