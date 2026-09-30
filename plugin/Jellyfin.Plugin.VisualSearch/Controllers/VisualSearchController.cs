@@ -122,7 +122,7 @@ public sealed class VisualSearchController : ControllerBase
         {
             return StatusCode(504, new { status = "timeout", stage = "search", message = ex.Message });
         }
-        catch (InvalidOperationException or InvalidDataException ex)
+        catch (Exception ex) when (ex is InvalidOperationException or InvalidDataException)
         {
             return BadRequest(new { status = "error", stage = "configuration", message = ex.Message });
         }
@@ -187,7 +187,7 @@ public sealed class VisualSearchController : ControllerBase
             return Ok(new { itemId = video.Id, textIndexed = indexed.Text, framesIndexed = indexed.Frames });
         }
         catch (TaskCanceledException ex) { return StatusCode(504, new { status = "timeout", stage = "index", message = ex.Message }); }
-        catch (InvalidOperationException or InvalidDataException ex) { return BadRequest(new { status = "error", stage = "configuration", message = ex.Message }); }
+        catch (Exception ex) when (ex is InvalidOperationException or InvalidDataException) { return BadRequest(new { status = "error", stage = "configuration", message = ex.Message }); }
         catch (HttpRequestException ex) { return StatusCode(503, new { status = "error", stage = "embedding", message = ex.Message }); }
     }
 
