@@ -53,13 +53,57 @@ public sealed class VisualSearchClient
         return new WorkerHealth { Status = "ready", Provider = "cloud", Model = config.EmbeddingModel, ModelVersion = config.EmbeddingModel, Dimension = vector.Length, Device = "cloud" };
     }
 
-    public Task<float[]> EmbedTextAsync(string text, CancellationToken cancellationToken) => EmbedAsync(text, "text", cancellationToken);
+    public Task<float[]> EmbedTextAsync(string text, CancellationToken cancellationToken)
+        => EmbedSingleAsync(text, "text", cancellationToken);
+
+    public async Task<IReadOnlyList<float[]>> EmbedTextsAsync(IReadOnlyList<string> texts, CancellationToken cancellationToken, Action<int, int, int>? batchProgress = null)
+    {
+        if (texts.Count == 0) return Array.Empty<float[]>();
+        return await EmbedBatchedAsync(texts, "text", cancellationToken, batchProgress).ConfigureAwait(false);
+    }
 
     public Task<float[]> EmbedImageAsync(byte[] image, CancellationToken cancellationToken)
+        => EmbedSingleImageAsync(image, cancellationToken);
+
+    public async Task<IReadOnlyList<float[]>> EmbedImagesAsync(IReadOnlyList<byte[]> images, CancellationToken cancellationToken, Action<int, int, int>? batchProgress = null)
     {
-        image = PrepareImage(image);
-        var mime = DetectMime(image);
-        return EmbedAsync($"data:{mime};base64,{Convert.ToBase64String(image)}", "image", cancellationToken);
+        if (images.Count == 0) return Array.Empty<float[]>();
+        var values = images.Select(image =>
+        {
+            var prepared = PrepareImage(image);
+            return $"data:{DetectMime(prepared)};base64,{Convert.ToBase64String(prepared)}";
+        }).ToArray();
+        return await EmbedBatchedAsync(values, "image", cancellationToken, batchProgress).ConfigureAwait(false);
+    }
+
+    private async Task<float[]> EmbedSingleAsync(string value, string kind, CancellationToken cancellationToken)
+    {
+        var vectors = await EmbedBatchRequestAsync(new[] { value }, kind, cancellationToken).ConfigureAwait(false);
+        return vectors[0];
+    }
+
+    private async Task<float[]> EmbedSingleImageAsync(byte[] image, CancellationToken cancellationToken)
+    {
+        var prepared = PrepareImage(image);
+        var value = $"data:{DetectMime(prepared)};base64,{Convert.ToBase64String(prepared)}";
+        return await EmbedSingleAsync(value, "image", cancellationToken).ConfigureAwait(false);
+    }
+
+    private async Task<IReadOnlyList<float[]>> EmbedBatchedAsync(IReadOnlyList<string> values, string kind, CancellationToken cancellationToken, Action<int, int, int>? batchProgress)
+    {
+        var batchSize = Math.Clamp(GetConfig().EmbeddingBatchSize, 1, 256);
+        var vectors = new List<float[]>(values.Count);
+        var totalBatches = (int)Math.Ceiling(values.Count / (double)batchSize);
+        var batchIndex = 0;
+        for (var offset = 0; offset < values.Count; offset += batchSize)
+        {
+            var count = Math.Min(batchSize, values.Count - offset);
+            var batch = values.Skip(offset).Take(count).ToArray();
+            vectors.AddRange(await EmbedBatchRequestAsync(batch, kind, cancellationToken).ConfigureAwait(false));
+            batchIndex++;
+            batchProgress?.Invoke(batchIndex, totalBatches, count);
+        }
+        return vectors;
     }
 
     public static bool IsRetryable(Exception exception)
@@ -73,14 +117,15 @@ public sealed class VisualSearchClient
         return false;
     }
 
-    private async Task<float[]> EmbedAsync(string value, string kind, CancellationToken cancellationToken)
+    private async Task<IReadOnlyList<float[]>> EmbedBatchRequestAsync(IReadOnlyList<string> values, string kind, CancellationToken cancellationToken)
     {
         var config = GetConfig();
+        if (values.Count == 0) return Array.Empty<float[]>();
         if (string.IsNullOrWhiteSpace(config.EmbeddingBaseUrl)) throw new InvalidOperationException("Embedding Base URL is not configured");
         if (string.IsNullOrWhiteSpace(config.EmbeddingModel)) throw new InvalidOperationException("Embedding model is not configured");
         var endpoint = config.EmbeddingBaseUrl.TrimEnd('/');
         if (!endpoint.EndsWith("/embeddings", StringComparison.OrdinalIgnoreCase)) endpoint += "/embeddings";
-        var bodies = BuildBodies(config, value, kind).ToArray();
+        var bodies = BuildBodies(config, values, kind).ToArray();
         string? lastError = null;
         foreach (var body in bodies)
         {
@@ -93,20 +138,27 @@ public sealed class VisualSearchClient
                 lastError = await ReadErrorAsync(response, "Embedding API").ConfigureAwait(false);
                 if (response.StatusCode == HttpStatusCode.RequestEntityTooLarge)
                     throw new HttpRequestException($"Embedding API rejected the image body with HTTP 413 (Payload Too Large). The plugin downsampled images to {GetConfig().EmbeddingMaxImageDimension}px; reduce that setting or increase the provider body limit. Response: {lastError}", null, response.StatusCode);
-                // A provider may reject one input shape while accepting another. Retry only 400s;
-                // authentication, rate limit and server errors must be surfaced immediately.
+                // Only HTTP 400 is eligible for trying another provider input shape.
                 if (response.StatusCode == HttpStatusCode.BadRequest && body != bodies[^1]) continue;
                 throw new HttpRequestException(lastError, null, response.StatusCode);
             }
+
             using var document = JsonDocument.Parse(await response.Content.ReadAsStreamAsync(cancellationToken).ConfigureAwait(false));
-            var vector = ReadVector(document.RootElement);
-            if (config.EmbeddingDimension > 0 && vector.Length != config.EmbeddingDimension) throw new InvalidDataException($"Embedding dimension mismatch: API returned {vector.Length}, configured {config.EmbeddingDimension}. The request includes dimensions={config.EmbeddingDimension}; check whether this model supports that dimension.");
-            return vector;
+            var vectors = ReadVectors(document.RootElement, values.Count);
+            if (config.EmbeddingDimension > 0)
+            {
+                foreach (var vector in vectors)
+                {
+                    if (vector.Length != config.EmbeddingDimension)
+                        throw new InvalidDataException($"Embedding dimension mismatch: API returned {vector.Length}, configured {config.EmbeddingDimension}. The request includes dimensions={config.EmbeddingDimension}; check whether this model supports that dimension.");
+                }
+            }
+            return vectors;
         }
         throw new HttpRequestException(lastError ?? "Embedding API rejected every supported input shape", null, HttpStatusCode.BadRequest);
     }
 
-    private static IEnumerable<Dictionary<string, object?>> BuildBodies(PluginConfiguration config, string value, string kind)
+    private static IEnumerable<Dictionary<string, object?>> BuildBodies(PluginConfiguration config, IReadOnlyList<string> values, string kind)
     {
         var shape = config.EmbeddingInputShape?.Trim().ToLowerInvariant() ?? "auto";
         var protocol = config.EmbeddingProtocol?.Trim().ToLowerInvariant() ?? "openai_multimodal";
@@ -117,15 +169,23 @@ public sealed class VisualSearchClient
             if (config.EmbeddingDimension > 0) body["dimensions"] = config.EmbeddingDimension;
             bodies.Add(body);
         }
-        if (protocol == "plain" || shape == "plain") Add(value);
-        else if (shape == "openai") Add(new object[] { kind == "text" ? new Dictionary<string, object?> { ["type"] = "text", ["text"] = value } : new Dictionary<string, object?> { ["type"] = "image_url", ["image_url"] = new Dictionary<string, object?> { ["url"] = value } } });
-        else if (shape == "provider") Add(new object[] { kind == "text" ? new Dictionary<string, object?> { ["text"] = value } : new Dictionary<string, object?> { ["image"] = value } });
+        object ScalarOrArray() => values.Count == 1 ? values[0] : values.ToArray();
+        object Objects(string type, string field)
+            => values.Select(value => (object)new Dictionary<string, object?> { [field] = value }).ToArray();
+        if (protocol == "plain" || shape == "plain") Add(ScalarOrArray());
+        else if (shape == "openai")
+            Add(values.Select(value => (object)(kind == "text"
+                ? new Dictionary<string, object?> { ["type"] = "text", ["text"] = value }
+                : new Dictionary<string, object?> { ["type"] = "image_url", ["image_url"] = new Dictionary<string, object?> { ["url"] = value } })).ToArray());
+        else if (shape == "provider") Add(Objects(kind == "text" ? "text" : "image", kind == "text" ? "text" : "image"));
         else
         {
-            // Inferera and several multimodal APIs use this compact shape.
-            Add(new object[] { kind == "text" ? new Dictionary<string, object?> { ["text"] = value } : new Dictionary<string, object?> { ["image"] = value } });
-            Add(value);
-            Add(new object[] { kind == "text" ? new Dictionary<string, object?> { ["type"] = "text", ["text"] = value } : new Dictionary<string, object?> { ["type"] = "image_url", ["image_url"] = new Dictionary<string, object?> { ["url"] = value } } });
+            // Inferera and several multimodal APIs use [{text:...}] / [{image:...}].
+            Add(Objects(kind == "text" ? "text" : "image", kind == "text" ? "text" : "image"));
+            Add(ScalarOrArray());
+            Add(values.Select(value => (object)(kind == "text"
+                ? new Dictionary<string, object?> { ["type"] = "text", ["text"] = value }
+                : new Dictionary<string, object?> { ["type"] = "image_url", ["image_url"] = new Dictionary<string, object?> { ["url"] = value } })).ToArray());
         }
         return bodies;
     }
@@ -211,30 +271,48 @@ public sealed class VisualSearchClient
         return config.QdrantUrl.TrimEnd('/');
     }
 
-    private static float[] ReadVector(JsonElement body)
+    private static IReadOnlyList<float[]> ReadVectors(JsonElement body, int expectedCount)
     {
-        JsonElement? value = null;
-        if (body.TryGetProperty("data", out var data) && data.ValueKind == JsonValueKind.Array && data.GetArrayLength() > 0 && data[0].ValueKind == JsonValueKind.Object && data[0].TryGetProperty("embedding", out var dataEmbedding)) value = dataEmbedding;
-        if (value is null && body.TryGetProperty("output", out var output) && output.ValueKind == JsonValueKind.Object && output.TryGetProperty("embeddings", out var embeddings) && embeddings.GetArrayLength() > 0)
+        var vectorValues = new List<JsonElement>();
+        if (body.TryGetProperty("data", out var data) && data.ValueKind == JsonValueKind.Array)
         {
-            var first = embeddings[0];
-            if (first.ValueKind == JsonValueKind.Object)
+            foreach (var item in data.EnumerateArray())
             {
-                if (first.TryGetProperty("embedding", out var outputEmbedding)) value = outputEmbedding;
-                else if (first.TryGetProperty("vector", out var outputVector)) value = outputVector;
+                if (item.ValueKind == JsonValueKind.Object && item.TryGetProperty("embedding", out var embedding)) vectorValues.Add(embedding);
+                else if (item.ValueKind == JsonValueKind.Object && item.TryGetProperty("vector", out var vector)) vectorValues.Add(vector);
             }
-            else value = first;
         }
-        if (value is null && body.TryGetProperty("embedding", out var direct)) value = direct;
-        if (value is null && body.TryGetProperty("vector", out var vector)) value = vector;
-        if (value is null || value.Value.ValueKind != JsonValueKind.Array)
-            throw new InvalidDataException($"Embedding response does not contain a vector array. Actual value type: {(value.HasValue ? value.Value.ValueKind.ToString() : "missing")}. Response: {Truncate(body.GetRawText())}");
-        var result = new float[value.Value.GetArrayLength()]; var i = 0;
-        foreach (var item in value.Value.EnumerateArray())
+        if (vectorValues.Count == 0 && body.TryGetProperty("output", out var output)
+            && output.ValueKind == JsonValueKind.Object
+            && output.TryGetProperty("embeddings", out var embeddings)
+            && embeddings.ValueKind == JsonValueKind.Array)
+        {
+            foreach (var item in embeddings.EnumerateArray())
+            {
+                if (item.ValueKind == JsonValueKind.Object && item.TryGetProperty("embedding", out var embedding)) vectorValues.Add(embedding);
+                else if (item.ValueKind == JsonValueKind.Object && item.TryGetProperty("vector", out var vector)) vectorValues.Add(vector);
+                else vectorValues.Add(item);
+            }
+        }
+        if (vectorValues.Count == 0 && body.TryGetProperty("embedding", out var direct)) vectorValues.Add(direct);
+        if (vectorValues.Count == 0 && body.TryGetProperty("vector", out var directVector)) vectorValues.Add(directVector);
+        if (vectorValues.Count != expectedCount)
+            throw new InvalidDataException($"Embedding response returned {vectorValues.Count} vectors, expected {expectedCount}. Response: {Truncate(body.GetRawText())}");
+
+        return vectorValues.Select((value, index) => ReadVectorArray(value, index, body)).ToArray();
+    }
+
+    private static float[] ReadVectorArray(JsonElement value, int vectorIndex, JsonElement body)
+    {
+        if (value.ValueKind != JsonValueKind.Array)
+            throw new InvalidDataException($"Embedding response vector {vectorIndex} is {value.ValueKind}, expected an array. Response: {Truncate(body.GetRawText())}");
+        var result = new float[value.GetArrayLength()];
+        var i = 0;
+        foreach (var item in value.EnumerateArray())
         {
             if (item.ValueKind == JsonValueKind.Number && item.TryGetSingle(out var number)) result[i++] = number;
             else if (item.ValueKind == JsonValueKind.String && float.TryParse(item.GetString(), NumberStyles.Float, CultureInfo.InvariantCulture, out var parsed)) result[i++] = parsed;
-            else throw new InvalidDataException($"Embedding vector contains unsupported element type {item.ValueKind} at index {i}. Response: {Truncate(body.GetRawText())}");
+            else throw new InvalidDataException($"Embedding vector {vectorIndex} contains unsupported element type {item.ValueKind} at index {i}. Response: {Truncate(body.GetRawText())}");
         }
         return result;
     }
