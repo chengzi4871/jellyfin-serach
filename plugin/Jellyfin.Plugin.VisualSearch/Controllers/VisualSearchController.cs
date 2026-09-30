@@ -195,7 +195,7 @@ public sealed class VisualSearchController : ControllerBase
     public async Task<ActionResult> TestRandom([FromBody] RandomTestRequest? request, CancellationToken cancellationToken)
     {
         var count = Math.Clamp(request?.Count ?? 3, 1, 10);
-        var frames = Math.Clamp(request?.FramesPerVideo ?? 2, 1, 5);
+        var frames = Math.Clamp(request?.FramesPerVideo ?? 2, 1, 100);
         WorkerHealth cloud;
         try
         {
@@ -234,7 +234,7 @@ public sealed class VisualSearchController : ControllerBase
     public async Task<ActionResult> Inspect([FromBody] InspectRequest? request, CancellationToken cancellationToken)
     {
         var count = Math.Clamp(request?.Count ?? 3, 1, 10);
-        var frames = Math.Clamp(request?.FramesPerVideo ?? 3, 1, 8);
+        var frames = Math.Clamp(request?.FramesPerVideo ?? 3, 1, 100);
         var queries = (request?.Queries ?? Array.Empty<string>()).Where(x => !string.IsNullOrWhiteSpace(x)).Select(x => x.Trim()).Distinct(StringComparer.OrdinalIgnoreCase).Take(20).ToArray();
         var videos = new List<MediaBrowser.Controller.Entities.Video>();
         foreach (var rawId in request?.ItemIds ?? Array.Empty<string>())
@@ -264,7 +264,7 @@ public sealed class VisualSearchController : ControllerBase
             video = _libraryManager.GetItemById<MediaBrowser.Controller.Entities.Video>(requestedId, userId);
         video ??= (await GetRandomVideosWithTrickplayAsync(1, userId, cancellationToken).ConfigureAwait(false)).FirstOrDefault();
         if (video is null) return NotFound("No video is available for semantic acceptance");
-        var frames = Math.Clamp(request?.FramesPerVideo ?? 3, 1, 8);
+        var frames = Math.Clamp(request?.FramesPerVideo ?? 3, 1, 100);
         var result = await _indexer.PreviewAsync(video, frames, cancellationToken).ConfigureAwait(false);
         return Ok(result);
     }
