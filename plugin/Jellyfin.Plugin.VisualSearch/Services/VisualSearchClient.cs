@@ -137,7 +137,7 @@ public sealed class VisualSearchClient
             {
                 lastError = await ReadErrorAsync(response, "Embedding API").ConfigureAwait(false);
                 if (response.StatusCode == HttpStatusCode.RequestEntityTooLarge)
-                    throw new HttpRequestException($"Embedding API rejected the image body with HTTP 413 (Payload Too Large). The plugin downsampled images to {GetConfig().EmbeddingMaxImageDimension}px; reduce that setting or increase the provider body limit. Response: {lastError}", null, response.StatusCode);
+                    throw new HttpRequestException($"Embedding API rejected the request with HTTP 413 (Payload Too Large). Reduce EmbeddingBatchSize or increase the provider body limit. The plugin downsampled images to {GetConfig().EmbeddingMaxImageDimension}px; reduce that setting or increase the provider body limit. Response: {lastError}", null, response.StatusCode);
                 // Only HTTP 400 is eligible for trying another provider input shape.
                 if (response.StatusCode == HttpStatusCode.BadRequest && body != bodies[^1]) continue;
                 throw new HttpRequestException(lastError, null, response.StatusCode);
@@ -170,18 +170,18 @@ public sealed class VisualSearchClient
             bodies.Add(body);
         }
         object ScalarOrArray() => values.Count == 1 ? values[0] : values.ToArray();
-        object Objects(string type, string field)
+        object Objects(string field)
             => values.Select(value => (object)new Dictionary<string, object?> { [field] = value }).ToArray();
         if (protocol == "plain" || shape == "plain") Add(ScalarOrArray());
         else if (shape == "openai")
             Add(values.Select(value => (object)(kind == "text"
                 ? new Dictionary<string, object?> { ["type"] = "text", ["text"] = value }
                 : new Dictionary<string, object?> { ["type"] = "image_url", ["image_url"] = new Dictionary<string, object?> { ["url"] = value } })).ToArray());
-        else if (shape == "provider") Add(Objects(kind == "text" ? "text" : "image", kind == "text" ? "text" : "image"));
+        else if (shape == "provider") Add(Objects(kind == "text" ? "text" : "image"));
         else
         {
             // Inferera and several multimodal APIs use [{text:...}] / [{image:...}].
-            Add(Objects(kind == "text" ? "text" : "image", kind == "text" ? "text" : "image"));
+            Add(Objects(kind == "text" ? "text" : "image"));
             Add(ScalarOrArray());
             Add(values.Select(value => (object)(kind == "text"
                 ? new Dictionary<string, object?> { ["type"] = "text", ["text"] = value }
@@ -273,10 +273,29 @@ public sealed class VisualSearchClient
 
     private static IReadOnlyList<float[]> ReadVectors(JsonElement body, int expectedCount)
     {
+        if (body.ValueKind != JsonValueKind.Object)
+            throw new InvalidDataException($"Embedding response is {body.ValueKind}, expected an object. Response: {Truncate(body.GetRawText())}");
         var vectorValues = new List<JsonElement>();
         if (body.TryGetProperty("data", out var data) && data.ValueKind == JsonValueKind.Array)
         {
-            foreach (var item in data.EnumerateArray())
+            var entries = data.EnumerateArray().ToArray();
+            if (entries.Any(item => item.ValueKind == JsonValueKind.Object && item.TryGetProperty("index", out _)))
+            {
+                var ordered = new JsonElement[expectedCount];
+                var seen = new bool[expectedCount];
+                foreach (var item in entries)
+                {
+                    if (item.ValueKind != JsonValueKind.Object || !item.TryGetProperty("index", out var indexValue)
+                        || !indexValue.TryGetInt32(out var index) || index < 0 || index >= expectedCount || seen[index])
+                        throw new InvalidDataException($"Embedding response has invalid, duplicate or missing input indexes. Response: {Truncate(body.GetRawText())}");
+                    ordered[index] = item;
+                    seen[index] = true;
+                }
+                if (seen.Any(value => !value))
+                    throw new InvalidDataException($"Embedding response is missing input indexes. Response: {Truncate(body.GetRawText())}");
+                entries = ordered;
+            }
+            foreach (var item in entries)
             {
                 if (item.ValueKind == JsonValueKind.Object && item.TryGetProperty("embedding", out var embedding)) vectorValues.Add(embedding);
                 else if (item.ValueKind == JsonValueKind.Object && item.TryGetProperty("vector", out var vector)) vectorValues.Add(vector);
@@ -297,7 +316,7 @@ public sealed class VisualSearchClient
         if (vectorValues.Count == 0 && body.TryGetProperty("embedding", out var direct)) vectorValues.Add(direct);
         if (vectorValues.Count == 0 && body.TryGetProperty("vector", out var directVector)) vectorValues.Add(directVector);
         if (vectorValues.Count != expectedCount)
-            throw new InvalidDataException($"Embedding response returned {vectorValues.Count} vectors, expected {expectedCount}. Response: {Truncate(body.GetRawText())}");
+            throw new InvalidDataException($"Embedding response returned {vectorValues.Count} vectors, expected {expectedCount}. The provider must return one vector per input; if it combines multimodal inputs, set Embedding batch size to 1. Response: {Truncate(body.GetRawText())}");
 
         return vectorValues.Select((value, index) => ReadVectorArray(value, index, body)).ToArray();
     }
@@ -306,6 +325,8 @@ public sealed class VisualSearchClient
     {
         if (value.ValueKind != JsonValueKind.Array)
             throw new InvalidDataException($"Embedding response vector {vectorIndex} is {value.ValueKind}, expected an array. Response: {Truncate(body.GetRawText())}");
+        if (value.GetArrayLength() == 0)
+            throw new InvalidDataException($"Embedding vector {vectorIndex} is empty. Response: {Truncate(body.GetRawText())}");
         var result = new float[value.GetArrayLength()];
         var i = 0;
         foreach (var item in value.EnumerateArray())
@@ -314,6 +335,8 @@ public sealed class VisualSearchClient
             else if (item.ValueKind == JsonValueKind.String && float.TryParse(item.GetString(), NumberStyles.Float, CultureInfo.InvariantCulture, out var parsed)) result[i++] = parsed;
             else throw new InvalidDataException($"Embedding vector {vectorIndex} contains unsupported element type {item.ValueKind} at index {i}. Response: {Truncate(body.GetRawText())}");
         }
+        if (result.Any(number => !float.IsFinite(number)) || result.All(number => number == 0))
+            throw new InvalidDataException($"Embedding vector {vectorIndex} contains non-finite values or is all zero. Response: {Truncate(body.GetRawText())}");
         return result;
     }
 
