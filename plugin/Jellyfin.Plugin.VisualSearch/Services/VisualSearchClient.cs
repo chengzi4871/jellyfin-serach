@@ -214,10 +214,16 @@ public sealed class VisualSearchClient
     private static float[] ReadVector(JsonElement body)
     {
         JsonElement? value = null;
-        if (body.TryGetProperty("data", out var data) && data.ValueKind == JsonValueKind.Array && data.GetArrayLength() > 0) value = data[0].GetProperty("embedding");
+        if (body.TryGetProperty("data", out var data) && data.ValueKind == JsonValueKind.Array && data.GetArrayLength() > 0 && data[0].ValueKind == JsonValueKind.Object && data[0].TryGetProperty("embedding", out var dataEmbedding)) value = dataEmbedding;
         if (value is null && body.TryGetProperty("output", out var output) && output.ValueKind == JsonValueKind.Object && output.TryGetProperty("embeddings", out var embeddings) && embeddings.GetArrayLength() > 0)
         {
-            var first = embeddings[0]; value = first.ValueKind == JsonValueKind.Object ? first.GetProperty(first.TryGetProperty("embedding", out _) ? "embedding" : "vector") : first;
+            var first = embeddings[0];
+            if (first.ValueKind == JsonValueKind.Object)
+            {
+                if (first.TryGetProperty("embedding", out var outputEmbedding)) value = outputEmbedding;
+                else if (first.TryGetProperty("vector", out var outputVector)) value = outputVector;
+            }
+            else value = first;
         }
         if (value is null && body.TryGetProperty("embedding", out var direct)) value = direct;
         if (value is null && body.TryGetProperty("vector", out var vector)) value = vector;
