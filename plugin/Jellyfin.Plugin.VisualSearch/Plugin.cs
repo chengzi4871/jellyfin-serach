@@ -30,11 +30,14 @@ public sealed class Plugin : BasePlugin<PluginConfiguration>, IHasWebPages
 public sealed class PluginConfiguration : BasePluginConfiguration
 {
     public bool Enabled { get; set; } = true;
-    public string QdrantUrl { get; set; } = "http://127.0.0.1:6333";
+    // Keep this empty by default: 127.0.0.1 points at the Jellyfin container in Docker.
+    public string QdrantUrl { get; set; } = "";
     public string EmbeddingBaseUrl { get; set; } = "";
     public string EmbeddingModel { get; set; } = "";
     public string EmbeddingApiKey { get; set; } = "";
     public string EmbeddingProtocol { get; set; } = "openai_multimodal";
+    /// <summary>auto uses provider-compatible {text}/{image} input and falls back to scalar input on HTTP 400.</summary>
+    public string EmbeddingInputShape { get; set; } = "auto";
     public int EmbeddingDimension { get; set; } = 1024;
     public int EmbeddingTimeoutSeconds { get; set; } = 60;
     public int FramesPerVideo { get; set; } = 12;
