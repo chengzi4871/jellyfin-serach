@@ -23,24 +23,40 @@ namespace Jellyfin.Plugin.VisualSearch;
 public sealed class VisualSearchClient
 {
     private readonly HttpClient _http;
+    private readonly Func<PluginConfiguration> _configurationProvider;
     private readonly object _queryCacheGate = new();
     private readonly Dictionary<string, QueryCacheEntry> _queryCache = new(StringComparer.Ordinal);
     private const int QueryCacheCapacity = 256;
     private static readonly TimeSpan QueryCacheLifetime = TimeSpan.FromMinutes(10);
 
-    public VisualSearchClient(HttpClient http) => _http = http;
+    public VisualSearchClient(HttpClient http)
+        : this(http, GetConfig) { }
+
+    internal VisualSearchClient(HttpClient http, Func<PluginConfiguration> configurationProvider)
+    {
+        _http = http;
+        _configurationProvider = configurationProvider;
+    }
 
     public async Task<WorkerHealth> GetHealthAsync(CancellationToken cancellationToken)
     {
-        var config = GetConfig();
+        var config = _configurationProvider();
         float[] vector;
         try
         {
             vector = await EmbedTextAsync("health check", cancellationToken).ConfigureAwait(false);
         }
-        catch (Exception ex) when (ex is HttpRequestException or InvalidOperationException or InvalidDataException)
+        catch (VisualSearchConfigurationException ex)
         {
-            throw new VisualSearchHealthException("cloud", ex.Message, ex, ex is InvalidOperationException or InvalidDataException ? 400 : 503);
+            throw new VisualSearchHealthException("cloud", ex.Message, ex, 400);
+        }
+        catch (HttpRequestException ex)
+        {
+            throw new VisualSearchHealthException("cloud", ex.Message, ex, 503);
+        }
+        catch (InvalidDataException ex)
+        {
+            throw new VisualSearchHealthException("cloud", ex.Message, ex, 502);
         }
 
         if (string.IsNullOrWhiteSpace(config.QdrantUrl))
@@ -50,7 +66,7 @@ public sealed class VisualSearchClient
             using var qdrant = await _http.GetAsync(config.QdrantUrl.TrimEnd('/') + "/healthz", cancellationToken).ConfigureAwait(false);
             await EnsureSuccessWithDetailsAsync(qdrant, "Qdrant health check").ConfigureAwait(false);
         }
-        catch (Exception ex) when (ex is HttpRequestException or InvalidOperationException)
+        catch (HttpRequestException ex)
         {
             throw new VisualSearchHealthException("qdrant", ex.Message, ex, 503);
         }
@@ -64,7 +80,7 @@ public sealed class VisualSearchClient
     public async Task<float[]> EmbedQueryTextAsync(string text, CancellationToken cancellationToken)
     {
         var normalized = NormalizeQuery(text);
-        var config = GetConfig();
+        var config = _configurationProvider();
         var key = string.Join("\u001f", config.EmbeddingBaseUrl, config.EmbeddingModel, config.EmbeddingProtocol, config.EmbeddingInputShape, config.EmbeddingDimension, normalized);
         lock (_queryCacheGate)
         {
@@ -128,7 +144,7 @@ public sealed class VisualSearchClient
 
     private async Task<IReadOnlyList<float[]>> EmbedBatchedAsync(IReadOnlyList<string> values, string kind, CancellationToken cancellationToken, Action<int, int, int>? batchProgress)
     {
-        var batchSize = Math.Clamp(GetConfig().EmbeddingBatchSize, 1, 256);
+        var batchSize = Math.Clamp(_configurationProvider().EmbeddingBatchSize, 1, 256);
         var vectors = new List<float[]>(values.Count);
         var totalBatches = (int)Math.Ceiling(values.Count / (double)batchSize);
         var batchIndex = 0;
@@ -156,10 +172,10 @@ public sealed class VisualSearchClient
 
     private async Task<IReadOnlyList<float[]>> EmbedBatchRequestAsync(IReadOnlyList<string> values, string kind, CancellationToken cancellationToken)
     {
-        var config = GetConfig();
+        var config = _configurationProvider();
         if (values.Count == 0) return Array.Empty<float[]>();
-        if (string.IsNullOrWhiteSpace(config.EmbeddingBaseUrl)) throw new InvalidOperationException("Embedding Base URL is not configured");
-        if (string.IsNullOrWhiteSpace(config.EmbeddingModel)) throw new InvalidOperationException("Embedding model is not configured");
+        if (string.IsNullOrWhiteSpace(config.EmbeddingBaseUrl)) throw new VisualSearchConfigurationException("Embedding Base URL is not configured");
+        if (string.IsNullOrWhiteSpace(config.EmbeddingModel)) throw new VisualSearchConfigurationException("Embedding model is not configured");
         var endpoint = config.EmbeddingBaseUrl.TrimEnd('/');
         if (!endpoint.EndsWith("/embeddings", StringComparison.OrdinalIgnoreCase)) endpoint += "/embeddings";
         var bodies = BuildBodies(config, values, kind).ToArray();
@@ -174,7 +190,7 @@ public sealed class VisualSearchClient
             {
                 lastError = await ReadErrorAsync(response, "Embedding API").ConfigureAwait(false);
                 if (response.StatusCode == HttpStatusCode.RequestEntityTooLarge)
-                    throw new HttpRequestException($"Embedding API rejected the request with HTTP 413 (Payload Too Large). Reduce EmbeddingBatchSize or increase the provider body limit. The plugin downsampled images to {GetConfig().EmbeddingMaxImageDimension}px; reduce that setting or increase the provider body limit. Response: {lastError}", null, response.StatusCode);
+                    throw new HttpRequestException($"Embedding API rejected the request with HTTP 413 (Payload Too Large). Reduce EmbeddingBatchSize or increase the provider body limit. The plugin downsampled images to {_configurationProvider().EmbeddingMaxImageDimension}px; reduce that setting or increase the provider body limit. Response: {lastError}", null, response.StatusCode);
                 // Only HTTP 400 is eligible for trying another provider input shape.
                 if (response.StatusCode == HttpStatusCode.BadRequest && body != bodies[^1]) continue;
                 throw new HttpRequestException(lastError, null, response.StatusCode);
@@ -229,15 +245,15 @@ public sealed class VisualSearchClient
 
     public async Task UpsertAsync(string collection, IEnumerable<object> points, CancellationToken cancellationToken)
     {
-        var config = GetConfig();
+        var config = _configurationProvider();
         using var response = await _http.PutAsJsonAsync(GetQdrantUrl(config) + "/collections/" + Uri.EscapeDataString(collection) + "/points?wait=true", new { points }, cancellationToken).ConfigureAwait(false);
         await EnsureSuccessWithDetailsAsync(response, $"Qdrant upsert ({collection})").ConfigureAwait(false);
     }
 
     public async Task EnsureCollectionsAsync(CancellationToken cancellationToken)
     {
-        var config = GetConfig();
-        if (string.IsNullOrWhiteSpace(config.QdrantUrl)) throw new InvalidOperationException("Qdrant URL is not configured");
+        var config = _configurationProvider();
+        if (string.IsNullOrWhiteSpace(config.QdrantUrl)) throw new VisualSearchConfigurationException("Qdrant URL is not configured");
         var body = new { vectors = new { size = config.EmbeddingDimension, distance = "Cosine" } };
         foreach (var collection in new[] { "jellyfin_video_text", "jellyfin_video_frames" })
         {
@@ -247,7 +263,7 @@ public sealed class VisualSearchClient
             {
                 using var document = JsonDocument.Parse(await existing.Content.ReadAsStreamAsync(cancellationToken).ConfigureAwait(false));
                 if (TryReadCollectionDimension(document.RootElement, out var existingDimension) && config.EmbeddingDimension > 0 && existingDimension != config.EmbeddingDimension)
-                    throw new InvalidOperationException($"Qdrant collection '{collection}' dimension mismatch: actual dimension={existingDimension}, configured dimension={config.EmbeddingDimension}. Delete collection '{collection}' in Qdrant, then click '初始化 Qdrant' to recreate it before indexing.");
+                    throw new VisualSearchConfigurationException($"Qdrant collection '{collection}' dimension mismatch: actual dimension={existingDimension}, configured dimension={config.EmbeddingDimension}. Delete collection '{collection}' in Qdrant, then click '初始化 Qdrant' to recreate it before indexing.");
                 continue;
             }
             if (existing.StatusCode != HttpStatusCode.NotFound)
@@ -286,7 +302,7 @@ public sealed class VisualSearchClient
 
     public async Task<IReadOnlyList<RemoteSearchHit>> SearchAsync(float[] vector, string collection, int limit, CancellationToken cancellationToken, IReadOnlyList<string>? libraryIds = null)
     {
-        var config = GetConfig();
+        var config = _configurationProvider();
         var ids = libraryIds?.Where(x => !string.IsNullOrWhiteSpace(x)).Select(x => x.Trim()).Distinct(StringComparer.OrdinalIgnoreCase).ToArray() ?? Array.Empty<string>();
         object body = ids.Length == 0
             ? new { vector, limit, with_payload = true }
@@ -303,12 +319,34 @@ public sealed class VisualSearchClient
         using var response = await _http.PostAsJsonAsync(GetQdrantUrl(config) + "/collections/" + Uri.EscapeDataString(collection) + "/points/search", body, cancellationToken).ConfigureAwait(false);
         await EnsureSuccessWithDetailsAsync(response, $"Qdrant search ({collection})").ConfigureAwait(false);
         using var document = JsonDocument.Parse(await response.Content.ReadAsStreamAsync(cancellationToken).ConfigureAwait(false));
+        return ParseSearchHits(document.RootElement);
+    }
+
+    /// <summary>
+    /// Parses Qdrant hits while copying payload values out of the response
+    /// document. JsonElement is a view over JsonDocument storage, so returning
+    /// the original element would leave a dangling reference after SearchAsync
+    /// disposes the document.
+    /// </summary>
+    internal static IReadOnlyList<RemoteSearchHit> ParseSearchHits(JsonElement root)
+    {
         var hits = new List<RemoteSearchHit>();
-        if (!document.RootElement.TryGetProperty("result", out var result)) return hits;
+        if (!root.TryGetProperty("result", out var result) || result.ValueKind != JsonValueKind.Array) return hits;
         foreach (var hit in result.EnumerateArray())
         {
-            if (!hit.TryGetProperty("payload", out var payload) || payload.ValueKind != JsonValueKind.Object || !payload.TryGetProperty("itemId", out var id)) continue;
-            hits.Add(new RemoteSearchHit(id.GetString() ?? string.Empty, hit.GetProperty("score").GetDouble(), payload));
+            if (!hit.TryGetProperty("payload", out var payload)
+                || payload.ValueKind != JsonValueKind.Object
+                || !payload.TryGetProperty("itemId", out var id)
+                || id.ValueKind != JsonValueKind.String
+                || !hit.TryGetProperty("score", out var score)
+                || !score.TryGetDouble(out var scoreValue))
+            {
+                continue;
+            }
+
+            // Clone is intentional: the returned record may be consumed after
+            // the using JsonDocument scope in SearchAsync has ended.
+            hits.Add(new RemoteSearchHit(id.GetString() ?? string.Empty, scoreValue, payload.Clone()));
         }
         return hits;
     }
@@ -317,7 +355,7 @@ public sealed class VisualSearchClient
 
     private static string GetQdrantUrl(PluginConfiguration config)
     {
-        if (string.IsNullOrWhiteSpace(config.QdrantUrl)) throw new InvalidOperationException("Qdrant URL is not configured. In Docker, use the host or Qdrant container address instead of 127.0.0.1.");
+        if (string.IsNullOrWhiteSpace(config.QdrantUrl)) throw new VisualSearchConfigurationException("Qdrant URL is not configured. In Docker, use the host or Qdrant container address instead of 127.0.0.1.");
         return config.QdrantUrl.TrimEnd('/');
     }
 
@@ -446,4 +484,14 @@ public sealed class VisualSearchHealthException : Exception
 
     public string Stage { get; }
     public int StatusCode { get; }
+}
+
+/// <summary>Raised only for values the administrator must correct in plugin configuration.</summary>
+public sealed class VisualSearchConfigurationException : Exception
+{
+    public VisualSearchConfigurationException(string message)
+        : base(message) { }
+
+    public VisualSearchConfigurationException(string message, Exception innerException)
+        : base(message, innerException) { }
 }
