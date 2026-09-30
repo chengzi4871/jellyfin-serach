@@ -203,7 +203,15 @@ public sealed class VisualSearchController : ControllerBase
         }
         catch (Exception ex) when (ex is HttpRequestException or TaskCanceledException)
         {
-            return StatusCode(503, new { status = "offline", message = "cloud embedding API or Qdrant is offline" });
+            return StatusCode(ex is TaskCanceledException ? 504 : 503, new { status = "error", stage = "health", message = ex.Message });
+        }
+        catch (VisualSearchHealthException ex)
+        {
+            return StatusCode(ex.StatusCode, new { status = "error", stage = ex.Stage, message = ex.Message });
+        }
+        catch (Exception ex) when (ex is InvalidOperationException or InvalidDataException)
+        {
+            return BadRequest(new { status = "error", stage = "configuration", message = ex.Message });
         }
         var videos = await GetRandomVideosWithTrickplayAsync(count, GetUserId(), cancellationToken).ConfigureAwait(false);
         var results = new System.Collections.Generic.List<EmbeddingProbeResult>();
