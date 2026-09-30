@@ -19,6 +19,17 @@
         return String(value == null ? '' : value).replace(/[&<>"']/g, function (c) { return ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[c]; });
     }
 
+    function prop(object, name) {
+        if (!object) return undefined;
+        var lower = name.charAt(0).toLowerCase() + name.slice(1);
+        return object[name] != null ? object[name] : object[lower];
+    }
+
+    function errorMessage(error) {
+        var body = error && (error.responseJSON || (error.response && error.response.data) || error.data);
+        return prop(body, 'Message') || prop(body, 'Error') || (error && error.message) || String(error);
+    }
+
     function ensureStyle() {
         if (document.getElementById('jf-visual-search-style')) return;
         var style = document.createElement('style');
@@ -30,14 +41,16 @@
     function closePanel() { var panel = document.getElementById(panelId); if (panel) panel.remove(); }
 
     function renderResults(container, data) {
-        var results = data && Array.isArray(data.results) ? data.results : [];
+        var results = prop(data, 'Results');
+        results = Array.isArray(results) ? results : [];
         if (!results.length) { container.innerHTML = '<p>没有找到结果。</p>'; return; }
         container.innerHTML = results.map(function (item) {
-            var detail = '#!/details?id=' + encodeURIComponent(item.itemId);
-            var scores = '综合 ' + Number(item.score || 0).toFixed(3);
-            if (item.visualScore != null) scores += ' · 画面 ' + Number(item.visualScore).toFixed(3);
-            if (item.titleScore != null) scores += ' · 标题 ' + Number(item.titleScore).toFixed(3);
-            return '<a class="jf-vs-result" href="' + detail + '"><strong>' + escapeHtml(item.title || item.itemId) + '</strong><br><small>' + escapeHtml(scores) + '</small></a>';
+            var itemId = prop(item, 'ItemId');
+            var detail = '#!/details?id=' + encodeURIComponent(itemId || '');
+            var scores = '综合 ' + Number(prop(item, 'Score') || 0).toFixed(3);
+            if (prop(item, 'VisualScore') != null) scores += ' · 画面 ' + Number(prop(item, 'VisualScore')).toFixed(3);
+            if (prop(item, 'TitleScore') != null) scores += ' · 标题 ' + Number(prop(item, 'TitleScore')).toFixed(3);
+            return '<a class="jf-vs-result" href="' + detail + '"><strong>' + escapeHtml(prop(item, 'Title') || itemId) + '</strong><br><small>' + escapeHtml(scores) + '</small></a>';
         }).join('');
     }
 
@@ -56,8 +69,8 @@
             var value = String(query.value || '').trim();
             if (!value) { status.textContent = '请输入搜索内容'; query.focus(); return; }
             var button = panel.querySelector('[data-jf-vs-search]'); button.disabled = true; status.textContent = ' 搜索中…';
-            try { var data = await API.search(value, [], 30); status.textContent = ' 共 ' + ((data.results || []).length) + ' 个结果'; renderResults(panel.querySelector('[data-jf-vs-results]'), data); }
-            catch (e) { status.textContent = ' 搜索失败：' + (e.message || e); }
+            try { var data = await API.search(value, [], 30); var results = prop(data, 'Results') || []; status.textContent = ' 共 ' + (Array.isArray(results) ? results.length : 0) + ' 个结果'; renderResults(panel.querySelector('[data-jf-vs-results]'), data); }
+            catch (e) { status.textContent = ' 搜索失败：' + errorMessage(e); }
             finally { button.disabled = false; }
         };
         panel.querySelector('[data-jf-vs-search]').onclick = run;
