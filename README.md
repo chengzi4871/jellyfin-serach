@@ -40,9 +40,9 @@ meta.json
 不要把 `MediaBrowser.*`、`Jellyfin.*`、`Microsoft.Extensions.*` 或 EntityFrameworkCore 等框架副本复制进插件目录，否则可能出现程序集加载后插件实例无法创建、后台不显示且日志不明显报错的问题。
 
 ```bash
-rm -rf ~/docker/jellyfin/config/data/plugins/VisualSearch_0.1.0.2
-mkdir -p ~/docker/jellyfin/config/data/plugins/VisualSearch_0.1.0.2
-unzip visual-search-plugin.zip -d ~/docker/jellyfin/config/data/plugins/VisualSearch_0.1.0.2
+rm -rf ~/docker/jellyfin/config/data/plugins/VisualSearch_0.1.0.3
+mkdir -p ~/docker/jellyfin/config/data/plugins/VisualSearch_0.1.0.3
+unzip visual-search-plugin.zip -d ~/docker/jellyfin/config/data/plugins/VisualSearch_0.1.0.3
 docker restart jellyfin
 ```
 
@@ -53,19 +53,21 @@ docker restart jellyfin
 3. 点击“初始化 Qdrant”；该操作是幂等的，已存在的集合会直接复用。
 4. 在“语义能力验收”中随机选择一个已有 Trickplay 的视频，先检查即将发送的标题与裁切帧；确认后才调用模型，需要更换时重新随机选择。
 5. 确认模型返回向量后手动输入查询词，查看标题和每帧的余弦相似度，再开始增量索引。
-6. 使用“查看索引状态”检查队列进度、等待重试次数、永久失败数、取帧成功/失败数和失败原因分布。
+6. 使用“刷新状态”检查队列进度、等待重试次数、永久失败数、取帧成功/失败数和失败原因分布。
 
 语义能力验收展示实际送入模型的标题和单独视频帧；查询词不预填写，由用户自行输入。测试不会写入正式 Qdrant 集合，也不再提供重复的小批量安全测试入口。
 
 ## 采样、去重和排序
 
-插件通过 Jellyfin 10.11 的 `ITrickplayManager` 读取 Trickplay 元数据，从拼图中裁剪单独帧，不重新解码原视频。读取时按照库的 `SaveTrickplayWithMedia` 设置优先查找媒体旁目录，并回退查找 Jellyfin 本地目录，避免迁移过程中漏掉数据。语义验收通过 `GetTrickplayItemsAsync` 只从已有 Trickplay 的视频中随机选择。采样约按 30 秒覆盖一个时间点，最少 6 帧，长视频会自然增加采样点；`单视频最大截图量` 只是硬上限，不再表示固定采样数。发送云端前可用配置开关启用低成本 dHash 和颜色差异近重复过滤，并保留首帧和末帧。
+插件通过 Jellyfin 10.11 的 `ITrickplayManager` 读取 Trickplay 元数据，从拼图中裁剪单独帧，不重新解码原视频。读取时按照库的 `SaveTrickplayWithMedia` 设置优先查找媒体旁目录，并回退查找 Jellyfin 本地目录，避免迁移过程中漏掉数据。语义验收通过 `GetTrickplayItemsAsync` 只从已有 Trickplay 的视频中随机选择。短视频按约 30 秒覆盖一个时间点，基础采样至少 6 帧；约 5 分钟以上的长视频可启用场景变化采样，最多读取 24 个稀疏探针，用 8×8 颜色指纹和 dHash 估计镜头变化，再以场景变化优先、时间覆盖补充的方式选择最终帧。相同 tile 在一次读取中只解码一次，探针不会全部发送到云端；`单视频最大截图量` 是最终硬上限，不表示固定采样数。发送云端前可用配置开关启用轻量 dHash 和颜色差异近重复过滤，并保留首帧和末帧。
 
 索引状态页每 3 秒刷新一次，显示运行类型、阶段、视频总进度、当前视频、当前帧、Embedding 批次、已完成输入、请求数、处理速度、预计剩余时间、自动重试和永久失败数量；取帧失败原因也会按类别汇总。
 
 ```text
-VisualScore = 0.7 × BestFrame + 0.3 × Top3Average
+VisualScore = 0.50 × BestFrame + 0.30 × Top3Average + 0.20 × Top5Average
 FinalScore = VisualScore × VisualWeight + TitleScore × TitleWeight
+
+标题和画面结果先分别做 P10～P90 归一化，再参与融合；返回给前端的综合、画面和标题分数均为 0～1 的归一化分数。
 ```
 
 缺少某一模态时会自动重新归一化。改变权重不需要重新生成向量。取帧失败会记录 `tile_missing`、`tile_read_error` 等原因，并在索引状态中单独统计。
