@@ -126,7 +126,13 @@ public sealed class VisualSearchClient
         {
             var url = config.QdrantUrl.TrimEnd('/') + "/collections/" + collection;
             using var existing = await _http.GetAsync(url, cancellationToken).ConfigureAwait(false);
-            if (existing.IsSuccessStatusCode) continue;
+            if (existing.IsSuccessStatusCode)
+            {
+                using var document = JsonDocument.Parse(await existing.Content.ReadAsStreamAsync(cancellationToken).ConfigureAwait(false));
+                if (TryReadCollectionDimension(document.RootElement, out var existingDimension) && config.EmbeddingDimension > 0 && existingDimension != config.EmbeddingDimension)
+                    throw new InvalidOperationException($"Qdrant collection {collection} uses dimension {existingDimension}, but the current embedding configuration is {config.EmbeddingDimension}. Recreate the collection before indexing with this model dimension.");
+                continue;
+            }
             if (existing.StatusCode != HttpStatusCode.NotFound)
                 await EnsureSuccessWithDetailsAsync(existing, $"Qdrant collection check ({collection})").ConfigureAwait(false);
 
@@ -148,6 +154,17 @@ public sealed class VisualSearchClient
         var body = await response.Content.ReadAsStringAsync().ConfigureAwait(false);
         if (body.Length > 500) body = body[..500];
         return $"{operation} failed with HTTP {(int)response.StatusCode} ({response.StatusCode}): {body}";
+    }
+
+    private static bool TryReadCollectionDimension(JsonElement body, out int dimension)
+    {
+        dimension = 0;
+        return body.TryGetProperty("result", out var result)
+            && result.TryGetProperty("config", out var config)
+            && config.TryGetProperty("params", out var parameters)
+            && parameters.TryGetProperty("vectors", out var vectors)
+            && vectors.TryGetProperty("size", out var size)
+            && size.TryGetInt32(out dimension);
     }
 
     public async Task<IReadOnlyList<RemoteSearchHit>> SearchAsync(float[] vector, string collection, int limit, CancellationToken cancellationToken)
