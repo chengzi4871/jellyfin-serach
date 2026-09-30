@@ -40,7 +40,11 @@ public sealed class PluginConfiguration : BasePluginConfiguration
     public string EmbeddingInputShape { get; set; } = "auto";
     public int EmbeddingDimension { get; set; } = 1024;
     public int EmbeddingTimeoutSeconds { get; set; } = 60;
+    public int EmbeddingMaxImageDimension { get; set; } = 768;
     public int FramesPerVideo { get; set; } = 12;
     public double VisualWeight { get; set; } = 0.75;
     public double TitleWeight { get; set; } = 0.25;
+    public bool ScheduledIndexEnabled { get; set; } = false;
+    public int ScheduledIndexIntervalMinutes { get; set; } = 360;
+    public int IndexRetryDelaySeconds { get; set; } = 15;
 }
