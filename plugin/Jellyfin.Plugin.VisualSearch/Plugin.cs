@@ -52,6 +52,24 @@ public sealed class PluginConfiguration : BasePluginConfiguration
     public bool SceneChangeSamplingEnabled { get; set; } = true;
     public double VisualWeight { get; set; } = 0.75;
     public double TitleWeight { get; set; } = 0.25;
+    /// <summary>Penalty used only by the built-in balanced preset when one modality is missing.</summary>
+    public double MissingModalityPenalty { get; set; } = 0.65;
+    /// <summary>Maximum number of cards returned to the semantic results page.</summary>
+    public int SearchResultLimit { get; set; } = 30;
+    /// <summary>Built-in or custom preset id selected when the search panel opens.</summary>
+    public string DefaultSearchPresetId { get; set; } = "balanced";
+    /// <summary>Comma separated ids exposed in the search panel. Empty means all built-ins and custom definitions.</summary>
+    public string SearchVisiblePresetIds { get; set; } = "balanced,title,visual,visual-priority,title-priority,custom";
+    /// <summary>JSON array of additional preset definitions. This is intentionally text based so Jellyfin's XML configuration remains stable.</summary>
+    public string SearchCustomPresetsJson { get; set; } = "";
+    /// <summary>JavaScript hook documented in the configuration page. It is applied by the result page to the raw candidate list.</summary>
+    public string SearchCustomCode { get; set; } = "return items.map(function (item) { item.customScore = item.score; return item; }).sort(function (a, b) { return b.customScore - a.customScore; });";
+    public bool SearchShowBestFramePoster { get; set; } = true;
+    public bool SearchShowBestFrameTimestamp { get; set; } = true;
+    public bool SearchShowScoreBreakdown { get; set; } = true;
+    public bool SearchShowRank { get; set; } = true;
+    public bool SearchShowPlayAll { get; set; } = true;
+    public bool SearchShowQueueAction { get; set; } = true;
     public bool ScheduledIndexEnabled { get; set; } = false;
     /// <summary>One line per weekday, e.g. 周一 02:00-06:00;22:00-23:30.</summary>
     public string ScheduledIndexWindows { get; set; } = string.Empty;

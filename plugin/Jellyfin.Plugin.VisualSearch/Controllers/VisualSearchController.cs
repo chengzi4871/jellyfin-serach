@@ -70,6 +70,29 @@ public sealed class VisualSearchController : ControllerBase
         return Content(reader.ReadToEnd(), "application/javascript");
     }
 
+    [HttpGet("SearchPresets")]
+    public ActionResult SearchPresets()
+    {
+        var configuration = Plugin.Instance?.Configuration ?? new PluginConfiguration();
+        var visible = Jellyfin.Plugin.VisualSearch.SearchPresets.GetVisible(configuration);
+        return Ok(new
+        {
+            presets = visible,
+            defaultPresetId = configuration.DefaultSearchPresetId,
+            resultLimit = Math.Clamp(configuration.SearchResultLimit, 1, 100),
+            customCode = configuration.SearchCustomCode,
+            display = new
+            {
+                bestFramePoster = configuration.SearchShowBestFramePoster,
+                bestFrameTimestamp = configuration.SearchShowBestFrameTimestamp,
+                scoreBreakdown = configuration.SearchShowScoreBreakdown,
+                rank = configuration.SearchShowRank,
+                playAll = configuration.SearchShowPlayAll,
+                queueAction = configuration.SearchShowQueueAction
+            }
+        });
+    }
+
     [HttpGet("IndexStatus")]
     public object IndexStatus() => _state;
 
@@ -86,6 +109,18 @@ public sealed class VisualSearchController : ControllerBase
         try
         {
             var started = DateTime.UtcNow;
+            var configuration = Plugin.Instance?.Configuration ?? new PluginConfiguration();
+            var preset = Jellyfin.Plugin.VisualSearch.SearchPresets.Resolve(configuration, request.PresetId);
+            if (string.Equals(preset.Id, "balanced", StringComparison.OrdinalIgnoreCase))
+            {
+                preset = preset with
+                {
+                    VisualWeight = Math.Max(0, configuration.VisualWeight),
+                    TitleWeight = Math.Max(0, configuration.TitleWeight),
+                    MissingModalityPenalty = Math.Clamp(configuration.MissingModalityPenalty, 0, 1)
+                };
+            }
+            var resultLimit = Math.Clamp(request.Limit > 0 ? request.Limit : configuration.SearchResultLimit, 1, 100);
             var vector = await _client.EmbedQueryTextAsync(request.Query, cancellationToken).ConfigureAwait(false);
             var textHitsTask = _client.SearchAsync(vector, "jellyfin_video_text", 100, cancellationToken, request.LibraryIds);
             var frameHitsTask = _client.SearchAsync(vector, "jellyfin_video_frames", 500, cancellationToken, request.LibraryIds);
@@ -101,29 +136,47 @@ public sealed class VisualSearchController : ControllerBase
                 frameGroups.TryGetValue(itemId, out var frames);
                 titleScores.TryGetValue(itemId, out var titleScore);
                 double? visualScore = frames is null || frames.Count == 0 ? null : AggregateVisualScore(frames);
-                var vw = Plugin.Instance?.Configuration.VisualWeight ?? 0.75;
-                var tw = Plugin.Instance?.Configuration.TitleWeight ?? 0.25;
-                vw = Math.Max(0, vw);
-                tw = Math.Max(0, tw);
-                var final = visualScore.HasValue && titleScores.ContainsKey(itemId)
-                    ? (vw + tw) <= 0 ? 0 : (visualScore.Value * vw + titleScore * tw) / (vw + tw)
-                    : visualScore ?? titleScore;
+                var hasVisual = visualScore.HasValue;
+                var hasTitle = titleScores.ContainsKey(itemId);
+                var final = CalculateFinalScore(preset, visualScore, hasTitle ? titleScore : null);
                 var best = frames is { Count: > 0 } ? frames[0].Hit : null;
                 var frame = best is null ? null : new BestFrame(
                     best.Payload.TryGetProperty("frameIndex", out var fi) ? fi.GetInt32() : 0,
                     best.Payload.TryGetProperty("timestampMs", out var ts) ? ts.GetInt64() : 0,
                     best.Score);
-                return (itemId, final, visualScore, title: titleScores.ContainsKey(itemId) ? titleScore : (double?)null, frame);
-            }).OrderByDescending(x => x.final).Take(Math.Clamp(request.Limit, 1, 100)).ToArray();
+                return (itemId, final, visualScore, title: hasTitle ? titleScore : (double?)null, frame, hasVisual, hasTitle);
+            });
+            var ordered = preset.SortBy.ToLowerInvariant() switch
+            {
+                "visual" => candidates.OrderByDescending(x => x.visual ?? -1).ThenByDescending(x => x.final),
+                "title" => candidates.OrderByDescending(x => x.title ?? -1).ThenByDescending(x => x.final),
+                "timestamp" => candidates.OrderBy(x => x.frame?.TimestampMs ?? long.MaxValue).ThenByDescending(x => x.final),
+                "title-asc" => candidates.OrderBy(x => x.itemId, StringComparer.OrdinalIgnoreCase),
+                _ => candidates.OrderByDescending(x => x.final).ThenBy(x => x.itemId, StringComparer.OrdinalIgnoreCase)
+            };
+            var selected = ordered.Take(resultLimit).ToArray();
             var userId = GetUserId();
-            var results = candidates.Select(hit =>
+            var results = selected.Select(hit =>
             {
                 if (!Guid.TryParse(hit.itemId, out var id)) return null;
                 // Passing the authenticated user id makes Jellyfin perform its normal access filtering.
                 var item = _libraryManager.GetItemById<MediaBrowser.Controller.Entities.Video>(id, userId);
-                return item is null ? null : new SearchResult(hit.itemId, item.Name, hit.final, hit.visualScore, hit.title, hit.frame);
+                if (item is null) return null;
+                return new SearchResult(hit.itemId, item.Name, hit.final, hit.visual, hit.title, hit.frame)
+                {
+                    RunTimeTicks = item.RunTimeTicks,
+                    Type = "Video",
+                    HasVisualMatch = hit.hasVisual,
+                    HasTitleMatch = hit.hasTitle,
+                    MatchKind = hit.hasVisual && hit.hasTitle ? "both" : hit.hasVisual ? "visual" : "title"
+                };
             }).Where(x => x is not null).Cast<SearchResult>().ToArray();
-            return Ok(new SearchResponse(request.Query, results, (long)(DateTime.UtcNow - started).TotalMilliseconds));
+            return Ok(new SearchResponse(request.Query, results, (long)(DateTime.UtcNow - started).TotalMilliseconds)
+            {
+                PresetId = preset.Id,
+                PresetName = preset.Name,
+                ResultLimit = resultLimit
+            });
         }
         catch (TaskCanceledException ex)
         {
@@ -327,6 +380,31 @@ public sealed class VisualSearchController : ControllerBase
         }).ToArray();
     }
 
+    private static double CalculateFinalScore(SearchPresetDefinition preset, double? visualScore, double? titleScore)
+    {
+        var hasVisual = visualScore.HasValue;
+        var hasTitle = titleScore.HasValue;
+        if (string.Equals(preset.Mode, "title", StringComparison.OrdinalIgnoreCase)) return titleScore ?? 0;
+        if (string.Equals(preset.Mode, "visual", StringComparison.OrdinalIgnoreCase)) return visualScore ?? 0;
+        if (!hasVisual && !hasTitle) return 0;
+
+        var visualWeight = Math.Max(0, preset.VisualWeight);
+        var titleWeight = Math.Max(0, preset.TitleWeight);
+        var availableWeight = (hasVisual ? visualWeight : 0) + (hasTitle ? titleWeight : 0);
+        var weighted = availableWeight <= 0
+            ? (visualScore ?? titleScore ?? 0)
+            : ((visualScore ?? 0) * visualWeight + (titleScore ?? 0) * titleWeight) / availableWeight;
+
+        // Only the built-in balanced preset (or an explicitly configured custom
+        // preset) opts into the missing-modality penalty. Title-only, visual-only,
+        // and priority presets intentionally keep their own semantics.
+        if (preset.ApplyMissingModalityPenalty && hasVisual != hasTitle)
+        {
+            weighted *= Math.Clamp(preset.MissingModalityPenalty, 0, 1);
+        }
+        return Math.Clamp(weighted, 0, 1);
+    }
+
     private static double Percentile(double[] values, double percentile)
     {
         if (values.Length == 0) return 0;
@@ -357,11 +435,23 @@ public sealed class VisualSearchController : ControllerBase
 }
 
 internal sealed record ScoredSearchHit(RemoteSearchHit Hit, double NormalizedScore);
-public sealed record SearchRequest(string Query, string[]? LibraryIds = null, int Limit = 30);
+public sealed record SearchRequest(string Query, string[]? LibraryIds = null, int Limit = 0, string? PresetId = null);
 public sealed record IndexItemRequest(string ItemId, string? LibraryId = null);
 public sealed record RandomTestRequest(int Count = 3, int FramesPerVideo = 2);
 public sealed record InspectRequest(int Count = 3, int FramesPerVideo = 3, string[]? Queries = null, string[]? ItemIds = null);
 public sealed record PreviewRequest(string? ItemId = null, int FramesPerVideo = 3);
-public sealed record SearchResponse(string Query, SearchResult[] Results, long ElapsedMs);
-public sealed record SearchResult(string ItemId, string Title, double Score, double? VisualScore, double? TitleScore, BestFrame? BestFrame);
+public sealed record SearchResponse(string Query, SearchResult[] Results, long ElapsedMs)
+{
+    public string PresetId { get; init; } = "balanced";
+    public string PresetName { get; init; } = "综合搜索";
+    public int ResultLimit { get; init; }
+}
+public sealed record SearchResult(string ItemId, string Title, double Score, double? VisualScore, double? TitleScore, BestFrame? BestFrame)
+{
+    public long? RunTimeTicks { get; init; }
+    public string Type { get; init; } = "Video";
+    public bool HasVisualMatch { get; init; }
+    public bool HasTitleMatch { get; init; }
+    public string MatchKind { get; init; } = "both";
+}
 public sealed record BestFrame(int FrameIndex, long TimestampMs, double Score);

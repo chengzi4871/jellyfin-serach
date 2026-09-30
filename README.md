@@ -40,9 +40,9 @@ meta.json
 不要把 `MediaBrowser.*`、`Jellyfin.*`、`Microsoft.Extensions.*` 或 EntityFrameworkCore 等框架副本复制进插件目录，否则可能出现程序集加载后插件实例无法创建、后台不显示且日志不明显报错的问题。
 
 ```bash
-rm -rf ~/docker/jellyfin/config/data/plugins/VisualSearch_0.1.0.5
-mkdir -p ~/docker/jellyfin/config/data/plugins/VisualSearch_0.1.0.5
-unzip visual-search-plugin.zip -d ~/docker/jellyfin/config/data/plugins/VisualSearch_0.1.0.5
+rm -rf ~/docker/jellyfin/config/data/plugins/VisualSearch_0.1.0.6
+mkdir -p ~/docker/jellyfin/config/data/plugins/VisualSearch_0.1.0.6
+unzip visual-search-plugin.zip -d ~/docker/jellyfin/config/data/plugins/VisualSearch_0.1.0.6
 docker restart jellyfin
 ```
 
@@ -72,6 +72,20 @@ FinalScore = VisualScore × VisualWeight + TitleScore × TitleWeight
 
 缺少某一模态时会自动重新归一化。改变权重不需要重新生成向量。取帧失败会记录 `tile_missing`、`tile_read_error` 等原因，并在索引状态中单独统计。
 
+## 搜索结果与可配置排序
+
+语义搜索入口打开独立的文件夹式结果页，而不是只能浏览的模态框。结果支持网格展示、最佳命中 Trickplay 帧封面、命中时间、详情页、单个播放、从命中时间点播放、播放全部和加入播放队列；页面会根据屏幕宽度自动切换为桌面多列或移动端双列布局。显示结果数量、最佳帧封面、时间点、分数拆解、排名、播放全部和队列按钮，都可以在插件设置中调整。
+
+插件内置五套服务端搜索配置：`综合搜索`、`只看标题`、`只看画面`、`画面优先`和`标题优先`，并额外提供`自定义代码`入口。综合搜索才会启用缺失模态降权：只有标题或只有画面命中时，结果分数会乘以“缺失模态降权”系数（默认 0.65）；其他内置配置和自定义配置不会强制套用这条规则。这样标题向量缺失或 Trickplay 缺失的视频不会在综合搜索中凭单一模态直接占据前列，同时自定义算法仍然拥有完整控制权。
+
+自定义配置以 JSON 保存，例如：
+
+```json
+[{"id":"family-recent","name":"家庭视频优先","mode":"weighted","visualWeight":0.85,"titleWeight":0.15,"applyMissingModalityPenalty":false,"sortBy":"score"}]
+```
+
+自定义评分和排序代码在结果页浏览器端运行，函数体签名为 `function(items, query, preset, helpers)`，必须返回数组。`items` 中有 `score`、`visualScore`、`titleScore`、`bestFrame`、`matchKind` 等字段，可以写入 `item.customScore` 后自行排序；`helpers` 提供 `clamp`、`scoreText` 和 `timestamp`。配置页的“检查自定义代码”会用示例候选执行一次，搜索页发生异常时会显示错误而不会破坏内置配置。
+
 ## API 和兼容性
 
 - `GET /VisualSearch/Health`：测试云端 Embedding 和 Qdrant；
@@ -81,6 +95,7 @@ FinalScore = VisualScore × VisualWeight + TitleScore × TitleWeight
 - `POST /VisualSearch/Index/Incremental`：增量索引；
 - `POST /VisualSearch/Index/Rebuild`：完整重建；
 - `POST /VisualSearch/Index/Pause`、`Resume`、`Cancel`：控制索引队列；
+- `GET /VisualSearch/SearchPresets`：返回当前可用搜索配置、结果页显示选项和自定义代码；
 - `POST /VisualSearch/Search`：语义检索。
 
 Embedding 网络错误、超时、429 和 5xx 会进入等待队列并指数退避重试；401、403、404、400 和 413 等配置或请求错误会立即记录为永久失败。定时增量索引默认关闭，启用后只在配置的星期及时段内执行；插件会记录上次完成的定时扫描时间，后续只处理新增或变更的视频。手动增量索引和完整重建会立即执行，并优先于等待中的定时任务。
