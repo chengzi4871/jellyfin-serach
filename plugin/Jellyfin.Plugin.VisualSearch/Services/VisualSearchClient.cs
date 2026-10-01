@@ -328,13 +328,36 @@ public sealed class VisualSearchClient
         await EnsureSuccessWithDetailsAsync(response, $"Qdrant upsert ({collection})").ConfigureAwait(false);
     }
 
+    /// <summary>Removes all points belonging to one Jellyfin item from a collection.</summary>
+    public async Task DeleteByItemAsync(string collection, string itemId, CancellationToken cancellationToken)
+    {
+        if (string.IsNullOrWhiteSpace(itemId)) return;
+        var config = _configurationProvider();
+        var body = new
+        {
+            filter = new
+            {
+                must = new[]
+                {
+                    new { key = "itemId", match = new { value = itemId } }
+                }
+            }
+        };
+        using var response = await _http.PostAsJsonAsync(
+            GetQdrantUrl(config) + "/collections/" + Uri.EscapeDataString(collection) + "/points/delete?wait=true",
+            body,
+            cancellationToken).ConfigureAwait(false);
+        if (response.StatusCode == HttpStatusCode.NotFound) return;
+        await EnsureSuccessWithDetailsAsync(response, $"Qdrant delete ({collection})").ConfigureAwait(false);
+    }
+
     public async Task EnsureCollectionsAsync(CancellationToken cancellationToken)
     {
         var config = _configurationProvider();
         if (string.IsNullOrWhiteSpace(config.QdrantUrl)) throw new VisualSearchConfigurationException("Qdrant URL is not configured");
         if (config.EmbeddingDimension <= 0) throw new VisualSearchConfigurationException("Embedding dimension must be greater than 0 before initializing Qdrant collections. Set it to the collection dimension (for this deployment: 1024), then initialize Qdrant again.");
         var body = new { vectors = new { size = config.EmbeddingDimension, distance = "Cosine" } };
-        foreach (var collection in new[] { "jellyfin_video_text", "jellyfin_video_frames" })
+        foreach (var collection in new[] { "jellyfin_video_text", "jellyfin_video_frames", "jellyfin_video_covers" })
         {
             var url = GetQdrantUrl(config) + "/collections/" + collection;
             using var existing = await _http.GetAsync(url, cancellationToken).ConfigureAwait(false);
@@ -399,6 +422,19 @@ public sealed class VisualSearchClient
         await EnsureSuccessWithDetailsAsync(response, $"Qdrant search ({collection})").ConfigureAwait(false);
         using var document = JsonDocument.Parse(await response.Content.ReadAsStreamAsync(cancellationToken).ConfigureAwait(false));
         return ParseSearchHits(document.RootElement);
+    }
+
+    /// <summary>Searches an optional collection, treating a not-yet-created collection as empty.</summary>
+    public async Task<IReadOnlyList<RemoteSearchHit>> SearchOptionalAsync(float[] vector, string collection, int limit, CancellationToken cancellationToken, IReadOnlyList<string>? libraryIds = null)
+    {
+        try
+        {
+            return await SearchAsync(vector, collection, limit, cancellationToken, libraryIds).ConfigureAwait(false);
+        }
+        catch (HttpRequestException ex) when (ex.StatusCode == HttpStatusCode.NotFound)
+        {
+            return Array.Empty<RemoteSearchHit>();
+        }
     }
 
     /// <summary>

@@ -7,6 +7,7 @@ using System.Threading.Tasks;
 using MediaBrowser.Controller.Entities;
 using MediaBrowser.Controller.Library;
 using MediaBrowser.Controller.Trickplay;
+using MediaBrowser.Model.Entities;
 using Jellyfin.Database.Implementations.Entities;
 using SixLabors.ImageSharp;
 using SixLabors.ImageSharp.Formats.Jpeg;
@@ -30,7 +31,7 @@ public sealed class VideoIndexer
         _state = state;
     }
 
-    public async Task<(bool Text, int Frames)> IndexAsync(Video video, string libraryId, CancellationToken cancellationToken)
+    public async Task<(bool Text, int Frames, bool Cover)> IndexAsync(Video video, string libraryId, CancellationToken cancellationToken)
     {
         var configuration = Plugin.Instance?.Configuration ?? new PluginConfiguration();
         var text = BuildTitleText(video);
@@ -74,8 +75,15 @@ public sealed class VideoIndexer
             frames.Add(new { id = DeterministicId(video.Id, sample.FrameIndex), vector = imageVectors[i], payload = new { itemId = video.Id.ToString(), libraryId, frameIndex = sample.FrameIndex, timestampMs = (long)sample.FrameIndex * frameSamples[i].Interval } });
         }
         _state.SetStage("saving_frames", totalBatches, totalBatches, 0);
-        if (frames.Count > 0) await _client.UpsertAsync("jellyfin_video_frames", frames, cancellationToken).ConfigureAwait(false);
-        if (frames.Count > 0) _state.RecordFrameSuccess(frames.Count);
+        var coverIndexed = false;
+        if (frames.Count > 0)
+        {
+            // A video may have been indexed with its Primary cover before Trickplay
+            // became available. Keep the source unambiguous once real frames exist.
+            await _client.DeleteByItemAsync("jellyfin_video_covers", video.Id.ToString(), cancellationToken).ConfigureAwait(false);
+            await _client.UpsertAsync("jellyfin_video_frames", frames, cancellationToken).ConfigureAwait(false);
+            _state.RecordFrameSuccess(frames.Count);
+        }
         else
         {
             var primaryReason = frameFailureReasons.Count == 0 ? "no_trickplay_frames" : frameFailureReasons.Keys.First();
@@ -83,9 +91,68 @@ public sealed class VideoIndexer
             _state.RecordFrameFailure(primaryReason, failureCount);
             foreach (var reason in frameFailureReasons.Where(x => !string.Equals(x.Key, primaryReason, StringComparison.OrdinalIgnoreCase)))
                 _state.FrameFailureReasons.AddOrUpdate(reason.Key, reason.Value, (_, old) => old + reason.Value);
+
+            if (configuration.CoverFallbackEnabled)
+            {
+                var cover = await ReadPrimaryCoverAsync(video, cancellationToken).ConfigureAwait(false);
+                if (cover is not null)
+                {
+                    _state.SetStage("embedding_cover", 0, 1, 1);
+                    _state.PlanEmbeddingInputs(1);
+                    var coverVector = await _client.EmbedImageAsync(cover.Bytes, cancellationToken).ConfigureAwait(false);
+                    _state.RecordEmbeddingInputs(1);
+                    await _client.DeleteByItemAsync("jellyfin_video_frames", video.Id.ToString(), cancellationToken).ConfigureAwait(false);
+                    await _client.UpsertAsync("jellyfin_video_covers", new[]
+                    {
+                        new
+                        {
+                            id = DeterministicCoverId(video.Id),
+                            vector = coverVector,
+                            payload = new
+                            {
+                                itemId = video.Id.ToString(),
+                                libraryId,
+                                visualSource = "primary_cover",
+                                imageTag = cover.Tag
+                            }
+                        }
+                    }, cancellationToken).ConfigureAwait(false);
+                    _state.RecordCoverSuccess();
+                    coverIndexed = true;
+                }
+                else
+                {
+                    await _client.DeleteByItemAsync("jellyfin_video_frames", video.Id.ToString(), cancellationToken).ConfigureAwait(false);
+                    await _client.DeleteByItemAsync("jellyfin_video_covers", video.Id.ToString(), cancellationToken).ConfigureAwait(false);
+                }
+            }
+            else
+            {
+                await _client.DeleteByItemAsync("jellyfin_video_frames", video.Id.ToString(), cancellationToken).ConfigureAwait(false);
+                await _client.DeleteByItemAsync("jellyfin_video_covers", video.Id.ToString(), cancellationToken).ConfigureAwait(false);
+            }
         }
         _state.SetStage("video_completed", 0, 0, 0);
-        return (true, frames.Count);
+        return (true, frames.Count, coverIndexed);
+    }
+
+    private static async Task<PrimaryCoverRead?> ReadPrimaryCoverAsync(Video video, CancellationToken cancellationToken)
+    {
+        var image = video.GetImageInfo(ImageType.Primary, 0);
+        if (image is null || !image.IsLocalFile || string.IsNullOrWhiteSpace(image.Path) || !File.Exists(image.Path)) return null;
+        try
+        {
+            var bytes = await File.ReadAllBytesAsync(image.Path, cancellationToken).ConfigureAwait(false);
+            if (bytes.Length == 0) return null;
+            using (Image.Load<Rgba32>(bytes))
+            {
+                return new PrimaryCoverRead(bytes, image.DateModified.ToString("O"));
+            }
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException && ex is not OutOfMemoryException)
+        {
+            return null;
+        }
     }
 
     private static string BuildTitleText(Video video)
@@ -336,6 +403,12 @@ public sealed class VideoIndexer
         using var md5 = System.Security.Cryptography.MD5.Create();
         return new Guid(md5.ComputeHash(System.Text.Encoding.UTF8.GetBytes($"{itemId:N}:{frame}"))).ToString();
     }
+
+    private static string DeterministicCoverId(Guid itemId)
+    {
+        using var md5 = System.Security.Cryptography.MD5.Create();
+        return new Guid(md5.ComputeHash(System.Text.Encoding.UTF8.GetBytes($"{itemId:N}:primary-cover"))).ToString();
+    }
 }
 
 internal sealed record FrameSample(int FrameIndex, byte[] Bytes);
@@ -356,6 +429,7 @@ internal sealed class FrameCandidate
     public double SceneScore { get; set; }
 }
 internal sealed record FrameReadResult(IReadOnlyList<FrameSample> Samples, IReadOnlyDictionary<string, int> FailureReasons, int SampledCount, int DeduplicatedCount, int SceneDiscardedCount);
+internal sealed record PrimaryCoverRead(byte[] Bytes, string Tag);
 
 public sealed record EmbeddingProbeResult(string ItemId, string Title, bool TextAccepted, int FramesTested, string? Error);
 public sealed record DetailedProbeResult(string ItemId, string Title, string TitleInput, VectorSummary TitleVector, IReadOnlyDictionary<string, double> TitleQueryScores, IReadOnlyList<ProbeFrame> Frames, IReadOnlyList<string> Queries);

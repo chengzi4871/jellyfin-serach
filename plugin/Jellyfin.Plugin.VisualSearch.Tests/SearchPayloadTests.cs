@@ -72,6 +72,18 @@ public sealed class SearchPayloadTests
         Assert.Equal(18000, hits[0].Payload.GetProperty("timestampMs").GetInt64());
     }
 
+    [Fact]
+    public async Task SearchOptionalTreatsMissingCoverCollectionAsEmpty()
+    {
+        using var http = new HttpClient(new MissingCollectionHandler());
+        var configuration = new PluginConfiguration { QdrantUrl = "http://qdrant.test" };
+        var client = new VisualSearchClient(http, () => configuration);
+
+        var hits = await client.SearchOptionalAsync(new[] { 0.1f, 0.2f }, "jellyfin_video_covers", 10, CancellationToken.None);
+
+        Assert.Empty(hits);
+    }
+
     private sealed class StubHandler : HttpMessageHandler
     {
         private readonly string _response;
@@ -82,6 +94,15 @@ public sealed class SearchPayloadTests
             => Task.FromResult(new HttpResponseMessage(HttpStatusCode.OK)
             {
                 Content = new StringContent(_response, Encoding.UTF8, "application/json")
+            });
+    }
+
+    private sealed class MissingCollectionHandler : HttpMessageHandler
+    {
+        protected override Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken)
+            => Task.FromResult(new HttpResponseMessage(HttpStatusCode.NotFound)
+            {
+                Content = new StringContent("collection not found", Encoding.UTF8, "text/plain")
             });
     }
 }

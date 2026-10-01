@@ -16,15 +16,16 @@ public sealed record SearchPresetDefinition(
     bool ApplyMissingModalityPenalty,
     double MissingModalityPenalty,
     string SortBy,
-    bool BuiltIn = false);
+    bool BuiltIn = false,
+    double CoverScoreMultiplier = 1d);
 
 public static class SearchPresets
 {
     public static readonly IReadOnlyList<SearchPresetDefinition> BuiltIns = new[]
     {
-        new SearchPresetDefinition("balanced", "综合搜索", "标题与画面共同参与；缺失模态会适度降权。", "balanced", 0.75, 0.25, true, 0.65, "score", true),
+        new SearchPresetDefinition("balanced", "综合搜索", "标题与画面共同参与；缺失模态会适度降权，Primary 封面按普通画面参与。", "balanced", 0.75, 0.25, true, 0.65, "score", true),
         new SearchPresetDefinition("title", "只看标题", "只使用标题向量，适合文件名或标题描述明确的内容。", "title", 0, 1, false, 1, "title", true),
-        new SearchPresetDefinition("visual", "只看画面", "只使用 Trickplay 画面向量，忽略标题。", "visual", 1, 0, false, 1, "visual", true),
+        new SearchPresetDefinition("visual", "只看画面", "只使用 Trickplay 或 Primary 封面向量，忽略标题。", "visual", 1, 0, false, 1, "visual", true),
         new SearchPresetDefinition("visual-priority", "画面优先", "画面权重高，标题作为辅助信号。", "weighted", 0.9, 0.1, false, 1, "score", true),
         new SearchPresetDefinition("title-priority", "标题优先", "标题权重高，画面作为辅助信号。", "weighted", 0.25, 0.75, false, 1, "score", true),
         new SearchPresetDefinition("custom", "自定义代码", "将原始候选交给结果页中的 JavaScript 评分/排序函数。", "custom", 0.75, 0.25, false, 1, "custom", true)
@@ -75,7 +76,8 @@ public static class SearchPresets
                 var penaltyEnabled = ReadBool(item, "applyMissingModalityPenalty", false);
                 var penalty = Math.Clamp(ReadDouble(item, "missingModalityPenalty", 0.65), 0, 1);
                 var sort = ReadString(item, "sortBy", "score").ToLowerInvariant();
-                result.Add(new SearchPresetDefinition(presetId, name, description, mode, visual, title, penaltyEnabled, penalty, sort));
+                var coverMultiplier = Math.Clamp(ReadDouble(item, "coverScoreMultiplier", 1), 0, 1);
+                result.Add(new SearchPresetDefinition(presetId, name, description, mode, visual, title, penaltyEnabled, penalty, sort, false, coverMultiplier));
             }
             return result;
         }

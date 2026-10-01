@@ -14,7 +14,7 @@ public sealed class Plugin : BasePlugin<PluginConfiguration>, IHasWebPages
 
     public static Plugin? Instance { get; private set; }
     public override string Name => "Visual Search";
-    public override string Description => "Video-level multimodal semantic search using titles and Trickplay frames.";
+    public override string Description => "Video-level multimodal semantic search using titles, Trickplay frames and primary covers.";
     public override Guid Id => Guid.Parse("5e1d5d27-2a38-4b4f-9d5e-0dba1e3b4b18");
 
     public IEnumerable<PluginPageInfo> GetPages() => new[]
@@ -50,10 +50,8 @@ public sealed class PluginConfiguration : BasePluginConfiguration
     public bool FrameDeduplicationEnabled { get; set; } = true;
     /// <summary>Use a small sparse probe pass to prefer scene boundaries on long videos.</summary>
     public bool SceneChangeSamplingEnabled { get; set; } = true;
-    public double VisualWeight { get; set; } = 0.75;
-    public double TitleWeight { get; set; } = 0.25;
-    /// <summary>Penalty used only by the built-in balanced preset when one modality is missing.</summary>
-    public double MissingModalityPenalty { get; set; } = 0.65;
+    /// <summary>Use Jellyfin's Primary image as the visual fallback when no usable Trickplay frame exists.</summary>
+    public bool CoverFallbackEnabled { get; set; } = true;
     /// <summary>Maximum number of cards returned to the semantic results page.</summary>
     public int SearchResultLimit { get; set; } = 30;
     /// <summary>Built-in or custom preset id selected when the search panel opens.</summary>

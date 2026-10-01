@@ -111,37 +111,38 @@ public sealed class VisualSearchController : ControllerBase
             var started = DateTime.UtcNow;
             var configuration = Plugin.Instance?.Configuration ?? new PluginConfiguration();
             var preset = Jellyfin.Plugin.VisualSearch.SearchPresets.Resolve(configuration, request.PresetId);
-            if (string.Equals(preset.Id, "balanced", StringComparison.OrdinalIgnoreCase))
-            {
-                preset = preset with
-                {
-                    VisualWeight = Math.Max(0, configuration.VisualWeight),
-                    TitleWeight = Math.Max(0, configuration.TitleWeight),
-                    MissingModalityPenalty = Math.Clamp(configuration.MissingModalityPenalty, 0, 1)
-                };
-            }
             var resultLimit = Math.Clamp(request.Limit > 0 ? request.Limit : configuration.SearchResultLimit, 1, 100);
             var vector = await _client.EmbedQueryTextAsync(request.Query, cancellationToken).ConfigureAwait(false);
             var textHitsTask = _client.SearchAsync(vector, "jellyfin_video_text", 100, cancellationToken, request.LibraryIds);
             var frameHitsTask = _client.SearchAsync(vector, "jellyfin_video_frames", 500, cancellationToken, request.LibraryIds);
-            await Task.WhenAll(textHitsTask, frameHitsTask).ConfigureAwait(false);
+            var coverHitsTask = _client.SearchOptionalAsync(vector, "jellyfin_video_covers", 500, cancellationToken, request.LibraryIds);
+            await Task.WhenAll(textHitsTask, frameHitsTask, coverHitsTask).ConfigureAwait(false);
             var textHits = await textHitsTask.ConfigureAwait(false);
             var frameHits = await frameHitsTask.ConfigureAwait(false);
+            var coverHits = await coverHitsTask.ConfigureAwait(false);
             var titleHits = NormalizeHits(textHits);
             var visualHits = NormalizeHits(frameHits);
+            var coverVisualHits = NormalizeHits(coverHits);
             var titleScores = titleHits.GroupBy(x => x.Hit.ItemId).ToDictionary(x => x.Key, x => x.Max(y => y.NormalizedScore));
             var frameGroups = visualHits.GroupBy(x => x.Hit.ItemId).ToDictionary(x => x.Key, x => x.OrderByDescending(y => y.NormalizedScore).ToList());
+            var coverScores = coverVisualHits.GroupBy(x => x.Hit.ItemId).ToDictionary(x => x.Key, x => x.Max(y => y.NormalizedScore));
             IEnumerable<string> candidateIds = preset.Mode.ToLowerInvariant() switch
             {
                 "title" => titleScores.Keys,
-                "visual" => frameGroups.Keys,
-                _ => titleScores.Keys.Concat(frameGroups.Keys).Distinct()
+                "visual" => frameGroups.Keys.Concat(coverScores.Keys).Distinct(),
+                _ => titleScores.Keys.Concat(frameGroups.Keys).Concat(coverScores.Keys).Distinct()
             };
             var candidates = candidateIds.Select(itemId =>
             {
                 frameGroups.TryGetValue(itemId, out var frames);
                 titleScores.TryGetValue(itemId, out var titleScore);
-                double? visualScore = frames is null || frames.Count == 0 ? null : AggregateVisualScore(frames);
+                var hasFrames = frames is { Count: > 0 };
+                var coverScore = coverScores.TryGetValue(itemId, out var coverValue) ? coverValue : (double?)null;
+                var hasCover = !hasFrames && coverScore.HasValue;
+                double? rawVisualScore = hasFrames ? AggregateVisualScore(frames!) : hasCover ? coverScore : null;
+                var visualScore = rawVisualScore;
+                if (hasCover && visualScore.HasValue)
+                    visualScore *= Math.Clamp(preset.CoverScoreMultiplier, 0, 1);
                 var hasVisual = visualScore.HasValue;
                 var hasTitle = titleScores.ContainsKey(itemId);
                 var final = CalculateFinalScore(preset, visualScore, hasTitle ? titleScore : null);
@@ -150,7 +151,7 @@ public sealed class VisualSearchController : ControllerBase
                     best.Payload.TryGetProperty("frameIndex", out var fi) ? fi.GetInt32() : 0,
                     best.Payload.TryGetProperty("timestampMs", out var ts) ? ts.GetInt64() : 0,
                     best.Score);
-                return (itemId, final, visualScore, title: hasTitle ? titleScore : (double?)null, frame, hasVisual, hasTitle);
+                return (itemId, final, visualScore, rawVisualScore, title: hasTitle ? titleScore : (double?)null, frame, visualSource: hasFrames ? "trickplay" : hasCover ? "primary_cover" : null, hasVisual, hasTitle);
             });
             var ordered = preset.SortBy.ToLowerInvariant() switch
             {
@@ -171,13 +172,18 @@ public sealed class VisualSearchController : ControllerBase
                 var visualForResult = string.Equals(preset.Mode, "title", StringComparison.OrdinalIgnoreCase) ? null : hit.visualScore;
                 var titleForResult = string.Equals(preset.Mode, "visual", StringComparison.OrdinalIgnoreCase) ? null : hit.title;
                 var frameForResult = string.Equals(preset.Mode, "title", StringComparison.OrdinalIgnoreCase) ? null : hit.frame;
+                var effectiveVisual = !string.Equals(preset.Mode, "title", StringComparison.OrdinalIgnoreCase) && hit.hasVisual;
+                var effectiveTitle = !string.Equals(preset.Mode, "visual", StringComparison.OrdinalIgnoreCase) && hit.hasTitle;
                 return new SearchResult(hit.itemId, item.Name, hit.final, visualForResult, titleForResult, frameForResult)
                 {
                     RunTimeTicks = item.RunTimeTicks,
                     Type = "Video",
-                    HasVisualMatch = hit.hasVisual,
-                    HasTitleMatch = hit.hasTitle,
-                    MatchKind = hit.hasVisual && hit.hasTitle ? "both" : hit.hasVisual ? "visual" : "title"
+                    HasVisualMatch = effectiveVisual,
+                    HasTitleMatch = effectiveTitle,
+                    MatchKind = effectiveVisual && effectiveTitle ? "both" : effectiveVisual ? "visual" : "title",
+                    VisualSource = hit.visualSource,
+                    RawVisualScore = string.Equals(preset.Mode, "title", StringComparison.OrdinalIgnoreCase) ? null : hit.rawVisualScore,
+                    CoverScoreMultiplier = hit.visualSource == "primary_cover" ? preset.CoverScoreMultiplier : 1d
                 };
             }).Where(x => x is not null).Cast<SearchResult>().ToArray();
             return Ok(new SearchResponse(request.Query, results, (long)(DateTime.UtcNow - started).TotalMilliseconds)
@@ -269,7 +275,7 @@ public sealed class VisualSearchController : ControllerBase
             var indexed = await _indexer.IndexAsync(video, libraryId, cancellationToken).ConfigureAwait(false);
             _state.IndexedVideos++;
             _state.Status = "ready";
-            return Ok(new { itemId = video.Id, textIndexed = indexed.Text, framesIndexed = indexed.Frames });
+            return Ok(new { itemId = video.Id, textIndexed = indexed.Text, framesIndexed = indexed.Frames, coverIndexed = indexed.Cover });
         }
         catch (TaskCanceledException ex) { return StatusCode(504, new { status = "timeout", stage = "index", message = ex.Message }); }
         catch (VisualSearchConfigurationException ex) { return BadRequest(new { status = "error", stage = "configuration", message = ex.Message }); }
@@ -462,5 +468,8 @@ public sealed record SearchResult(string ItemId, string Title, double Score, dou
     public bool HasVisualMatch { get; init; }
     public bool HasTitleMatch { get; init; }
     public string MatchKind { get; init; } = "both";
+    public string? VisualSource { get; init; }
+    public double? RawVisualScore { get; init; }
+    public double CoverScoreMultiplier { get; init; } = 1d;
 }
 public sealed record BestFrame(int FrameIndex, long TimestampMs, double Score);

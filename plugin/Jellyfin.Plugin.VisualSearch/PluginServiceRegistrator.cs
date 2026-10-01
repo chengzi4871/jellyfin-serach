@@ -67,6 +67,8 @@ public sealed class VisualSearchState
     public long PendingVideos { get; set; }
     public long FailedVideos { get; set; }
     public long VideosWithFrames { get; set; }
+    public long VideosWithCovers { get; set; }
+    public long CoversRead { get; set; }
     public long VideosWithoutFrames { get; set; }
     public long FramesRead { get; set; }
     public long FrameReadFailures { get; set; }
@@ -110,6 +112,8 @@ public sealed class VisualSearchState
         PendingVideos = 0;
         FailedVideos = 0;
         VideosWithFrames = 0;
+        VideosWithCovers = 0;
+        CoversRead = 0;
         VideosWithoutFrames = 0;
         FramesRead = 0;
         FrameReadFailures = 0;
@@ -190,7 +194,7 @@ public sealed class VisualSearchState
         CurrentBatchIndex = batchIndex;
         CurrentBatchTotal = batchTotal;
         CurrentBatchItems = batchItems;
-        if (stage == "embedding_frames")
+        if (stage is "embedding_frames" or "embedding_cover")
         {
             CurrentFrameTotal = batchItems;
             CurrentFrameCompleted = 0;
@@ -247,6 +251,12 @@ public sealed class VisualSearchState
     {
         VideosWithFrames++;
         FramesRead += count;
+    }
+
+    public void RecordCoverSuccess()
+    {
+        VideosWithCovers++;
+        CoversRead++;
     }
 
     public void RecordFrameFailure(string reason, int count = 1)
