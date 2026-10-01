@@ -296,7 +296,13 @@
             : 0;
         var bridge = createPlaybackBridge(ids, serverId, action, startPositionTicks);
         if (!bridge || !bridge.firstElementChild) return false;
-        var firstCard = bridge.firstElementChild;
+        // A reused native container already has its own result cards before
+        // the bridge cards are appended. Never use firstElementChild here:
+        // that would click an unrelated page item instead of the synthetic
+        // card carrying the visual-search IDs.
+        var bridgeState = bridge.__jfVisualSearchPlayback;
+        var firstCard = bridgeState && bridgeState.cards && bridgeState.cards[0];
+        if (!firstCard) return false;
         // webcomponents.js upgrades legacy customized built-ins from a
         // MutationObserver. Dispatch after the element has been attached so
         // Jellyfin's itemShortcuts listener is already registered.
