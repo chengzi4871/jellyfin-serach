@@ -283,7 +283,14 @@
 
     function dispatchPlaybackBridge(ids, serverId, startItem, queue) {
         if (!ids.length || !serverId) return false;
-        var action = queue ? 'queueallfromhere' : ids.length === 1 ? 'play' : 'playallfromhere';
+        // Use Jellyfin's ID-based "play all from here" path even for one
+        // item. The regular "play" shortcut first runs playbackManager.canPlay
+        // against the card's lightweight data attributes; a visual-search
+        // result is not a complete Jellyfin DTO, so that guard can silently
+        // reject playback (only a console.warn, no request). The all-from-here
+        // shortcut collects the IDs and calls playbackManager.play directly,
+        // which is the same path Jellyfin uses for a real item container.
+        var action = queue ? 'queueallfromhere' : 'playallfromhere';
         var startPositionTicks = !queue && startItem && prop(startItem, 'BestFrame')
             ? Math.max(0, Number(prop(prop(startItem, 'BestFrame'), 'TimestampMs') || 0) * 10000)
             : 0;
@@ -303,7 +310,11 @@
                         event = document.createEvent('MouseEvents');
                         event.initMouseEvent('click', true, true, window, 1, 0, 0, 0, 0, false, false, false, false, 0, null);
                     }
-                    firstCard.dispatchEvent(event);
+                    // HTMLElement.click() follows the browser's normal click
+                    // activation path and is what Jellyfin's own cards use;
+                    // keep the event fallback for older WebViews.
+                    if (typeof firstCard.click === 'function') firstCard.click();
+                    else firstCard.dispatchEvent(event);
                     // PlaybackManager copies the card attributes before its
                     // asynchronous item lookup starts. Keep the bridge long
                     // enough for that lookup to be scheduled, then detach it.

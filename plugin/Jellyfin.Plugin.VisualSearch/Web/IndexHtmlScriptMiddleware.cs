@@ -13,7 +13,7 @@ public sealed class IndexHtmlScriptMiddleware
     // Keep the script at the end of the document and load it synchronously. Some
     // embedded WebViews do not reliably execute a deferred script after a cached
     // index document is rewritten. The version query also busts an old script.
-    private const string Snippet = "\n<!-- VisualSearch:begin --><script src=\"../VisualSearch/ClientScript?v=0.1.0.11\"></script><!-- VisualSearch:end -->\n";
+    private const string Snippet = "\n<!-- VisualSearch:begin --><script src=\"../VisualSearch/ClientScript?v=0.1.0.12\"></script><!-- VisualSearch:end -->\n";
     private readonly RequestDelegate _next;
     public IndexHtmlScriptMiddleware(RequestDelegate next) => _next = next;
 
