@@ -9,6 +9,10 @@
     var styleId = 'jf-visual-search-style';
     var observerTimer = 0;
     var observerAttached = false;
+    var playbackWatchTimer = 0;
+    var suspendedPanel = null;
+    var playbackRouteSeen = false;
+    var playbackSuspendStartedAt = 0;
     var settings = { resultLimit: 30, defaultPresetId: 'balanced', presets: [], customCode: '', display: {} };
 
     function prop(object, name) {
@@ -81,11 +85,69 @@
         (document.head || document.documentElement).appendChild(style);
     }
 
+    function isPlaybackRoute() {
+        var route = String(window.location.hash || window.location.pathname || '').toLowerCase();
+        return /(?:^|[\/#!])video(?:[\/?#.]|$)/.test(route);
+    }
+
+    function stopPlaybackRouteWatch() {
+        if (playbackWatchTimer) {
+            window.clearInterval(playbackWatchTimer);
+            playbackWatchTimer = 0;
+        }
+    }
+
+    function restorePanelAfterPlayback() {
+        if (!suspendedPanel) return;
+        var panel = suspendedPanel;
+        suspendedPanel = null;
+        stopPlaybackRouteWatch();
+        panel.style.display = '';
+        panel.removeAttribute('aria-hidden');
+        var launcher = document.getElementById(launcherId);
+        if (launcher) launcher.style.display = '';
+    }
+
+    function checkPlaybackRouteReturn() {
+        if (!suspendedPanel) return;
+        if (isPlaybackRoute()) {
+            playbackRouteSeen = true;
+            return;
+        }
+        // Do not restore merely because a playback request failed before the
+        // player route was entered. Once /video was seen, leaving it means the
+        // user has returned from playback and the old search panel is safe to show.
+        if (playbackRouteSeen || Date.now() - playbackSuspendStartedAt > 8000) restorePanelAfterPlayback();
+    }
+
+    function suspendPanelForPlayback() {
+        var panel = document.getElementById(panelId);
+        if (!panel) return;
+        suspendedPanel = panel;
+        playbackRouteSeen = false;
+        playbackSuspendStartedAt = Date.now();
+        panel.style.display = 'none';
+        panel.setAttribute('aria-hidden', 'true');
+        var launcher = document.getElementById(launcherId);
+        if (launcher) {
+            launcher.style.display = 'none';
+            launcher.setAttribute('aria-expanded', 'false');
+        }
+        stopPlaybackRouteWatch();
+        playbackWatchTimer = window.setInterval(checkPlaybackRouteReturn, 250);
+        checkPlaybackRouteReturn();
+    }
+
     function closePanel() {
+        stopPlaybackRouteWatch();
+        suspendedPanel = null;
         var panel = document.getElementById(panelId);
         if (panel) panel.remove();
         var launcher = document.getElementById(launcherId);
-        if (launcher) launcher.setAttribute('aria-expanded', 'false');
+        if (launcher) {
+            launcher.style.display = '';
+            launcher.setAttribute('aria-expanded', 'false');
+        }
     }
 
     function formatTimestamp(milliseconds) {
@@ -117,10 +179,16 @@
 
     function getPlaybackServerId() {
         try {
-            return ApiClient && typeof ApiClient.serverId === 'function' ? ApiClient.serverId() : '';
-        } catch (_) {
-            return '';
-        }
+            if (ApiClient && typeof ApiClient.serverId === 'function') {
+                var id = ApiClient.serverId();
+                if (id) return id;
+            }
+            if (ApiClient && typeof ApiClient.serverInfo === 'function') {
+                var info = ApiClient.serverInfo();
+                return info && info.Id ? info.Id : '';
+            }
+        } catch (_) { }
+        return '';
     }
 
     function getPlaybackIds(results) {
@@ -132,28 +200,84 @@
         });
     }
 
+    function createPlaybackBridge(ids, serverId, action, startPositionTicks) {
+        var bridge;
+        try {
+            // Jellyfin 10.11 registers this legacy customized built-in element;
+            // its click handler is wired to the module-scoped PlaybackManager.
+            bridge = document.createElement('div', 'emby-itemscontainer');
+        } catch (_) { bridge = null; }
+        if (!bridge || typeof bridge.enableMultiSelect !== 'function') {
+            try {
+                var modernBridge = document.createElement('div', { is: 'emby-itemscontainer' });
+                if (modernBridge && typeof modernBridge.enableMultiSelect === 'function') bridge = modernBridge;
+            } catch (_) { }
+        }
+        if (!bridge || typeof bridge.enableMultiSelect !== 'function') return null;
+        bridge.className = 'itemsContainer jf-vs-playback-bridge';
+        bridge.style.display = 'none';
+        ids.forEach(function (id, index) {
+            var card = document.createElement('div');
+            card.className = 'itemAction';
+            card.setAttribute('data-action', action);
+            card.setAttribute('data-id', id);
+            card.setAttribute('data-serverid', serverId);
+            card.setAttribute('data-type', 'Video');
+            card.setAttribute('data-mediatype', 'Video');
+            card.setAttribute('data-isfolder', 'false');
+            if (index === 0 && startPositionTicks > 0) card.setAttribute('data-positionticks', String(startPositionTicks));
+            bridge.appendChild(card);
+        });
+        document.body.appendChild(bridge);
+        return bridge;
+    }
+
+    function dispatchPlaybackBridge(ids, serverId, startItem, queue) {
+        if (!ids.length || !serverId) return false;
+        var action = queue ? 'queueallfromhere' : ids.length === 1 ? 'play' : 'playallfromhere';
+        var startPositionTicks = !queue && startItem && prop(startItem, 'BestFrame')
+            ? Math.max(0, Number(prop(prop(startItem, 'BestFrame'), 'TimestampMs') || 0) * 10000)
+            : 0;
+        var bridge = createPlaybackBridge(ids, serverId, action, startPositionTicks);
+        if (!bridge || !bridge.firstElementChild) return false;
+        var firstCard = bridge.firstElementChild;
+        try {
+            firstCard.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true, view: window }));
+            // PlaybackManager consumes the item attributes synchronously. Keep
+            // the bridge briefly so delayed event handlers can finish cleanly.
+            window.setTimeout(function () { if (bridge.parentNode) bridge.parentNode.removeChild(bridge); }, 1000);
+            return true;
+        } catch (error) {
+            if (bridge.parentNode) bridge.parentNode.removeChild(bridge);
+            console.error('[Visual Search] playback bridge failed', error);
+            return false;
+        }
+    }
+
     async function playResults(results, startItem) {
-        var manager = getPlaybackManager();
+        suspendPanelForPlayback();
         var ids = getPlaybackIds(results);
         var serverId = getPlaybackServerId();
-        if (!manager || !ids.length || !serverId) { if (startItem) window.location.hash = '#!/details?id=' + encodeURIComponent(prop(startItem, 'ItemId')); return; }
-        // Let Jellyfin's PlaybackManager fetch the complete DTO in one batch and
-        // construct the native playback queue. Fetching every item separately
-        // here can issue dozens of /Items/{id} requests and leave Play All stuck.
-        var options = { ids: ids, serverId: serverId, autoplay: true };
-        if (startItem && prop(startItem, 'BestFrame')) options.startPositionTicks = Math.max(0, Number(prop(prop(startItem, 'BestFrame'), 'TimestampMs') || 0) * 10000);
-        try { await manager.play(options); } catch (error) { console.error('[Visual Search] playback failed', error); if (startItem) window.location.hash = '#!/details?id=' + encodeURIComponent(prop(startItem, 'ItemId')); }
+        var manager = getPlaybackManager();
+        if (manager && ids.length && serverId) {
+            try { await manager.play({ ids: ids, serverId: serverId, autoplay: true, startPositionTicks: startItem && prop(startItem, 'BestFrame') ? Math.max(0, Number(prop(prop(startItem, 'BestFrame'), 'TimestampMs') || 0) * 10000) : 0 }); return; }
+            catch (error) { console.warn('[Visual Search] direct playback unavailable, using Jellyfin bridge', error); }
+        }
+        if (!dispatchPlaybackBridge(ids, serverId, startItem, false) && startItem) {
+            console.error('[Visual Search] unable to start playback', { hasServerId: !!serverId, itemCount: ids.length });
+            window.location.hash = '#!/details?id=' + encodeURIComponent(prop(startItem, 'ItemId'));
+        }
     }
 
     async function queueResults(results) {
-        var manager = getPlaybackManager();
-        if (!manager) return;
         var ids = getPlaybackIds(results);
         var serverId = getPlaybackServerId();
-        if (!ids.length || !serverId) return;
-        // Use the same batch path for queueing; PlaybackManager handles the
-        // current player and native queue semantics for us.
-        try { await manager.queue({ ids: ids, serverId: serverId }); } catch (error) { console.error('[Visual Search] queue failed', error); }
+        var manager = getPlaybackManager();
+        if (manager && ids.length && serverId) {
+            try { await manager.queue({ ids: ids, serverId: serverId }); return; }
+            catch (error) { console.warn('[Visual Search] direct queue unavailable, using Jellyfin bridge', error); }
+        }
+        if (!dispatchPlaybackBridge(ids, serverId, null, true)) console.error('[Visual Search] unable to queue playback', { hasServerId: !!serverId, itemCount: ids.length });
     }
 
     function applyCustomCode(results, query, preset) {
@@ -257,6 +381,6 @@
     document.addEventListener('keydown', function (event) { if ((event.ctrlKey || event.metaKey) && event.shiftKey && event.key.toLowerCase() === 'k') { event.preventDefault(); ensureLauncher(); var launcher = document.getElementById(launcherId); if (launcher) launcher.setAttribute('aria-expanded', 'true'); openPanel(); } else if (event.key === 'Escape' && document.getElementById(panelId)) closePanel(); });
     function scheduleEnsure() { if (observerTimer) return; observerTimer = window.setTimeout(function () { observerTimer = 0; ensureLauncher(); }, 180); }
     function attachObserver() { if (observerAttached || !window.MutationObserver) return; var root = document.body || document.documentElement; if (!root) return; observerAttached = true; new MutationObserver(scheduleEnsure).observe(root, { childList: true, subtree: true }); }
-    function initialize() { ensureLauncher(); attachObserver(); }
-    document.addEventListener('DOMContentLoaded', initialize, false); document.addEventListener('readystatechange', initialize, false); window.addEventListener('load', initialize, false); window.addEventListener('pageshow', initialize, false); if (document.addEventListener) document.addEventListener('visibilitychange', scheduleEnsure, false); initialize(); [0, 250, 800, 1800].forEach(function (delay) { window.setTimeout(initialize, delay); });
+    function initialize() { ensureLauncher(); attachObserver(); checkPlaybackRouteReturn(); }
+    document.addEventListener('DOMContentLoaded', initialize, false); document.addEventListener('readystatechange', initialize, false); window.addEventListener('load', initialize, false); window.addEventListener('pageshow', initialize, false); window.addEventListener('hashchange', checkPlaybackRouteReturn, false); window.addEventListener('popstate', checkPlaybackRouteReturn, false); if (document.addEventListener) { document.addEventListener('visibilitychange', scheduleEnsure, false); document.addEventListener('viewshow', checkPlaybackRouteReturn, false); } initialize(); [0, 250, 800, 1800].forEach(function (delay) { window.setTimeout(initialize, delay); });
 })();
