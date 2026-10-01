@@ -115,28 +115,45 @@
         return null;
     }
 
-    async function loadItems(results) {
-        var ids = results.map(function (item) { return prop(item, 'ItemId'); }).filter(Boolean);
-        if (!ids.length || !ApiClient.getItem) return [];
-        return (await Promise.all(ids.map(function (id) { return ApiClient.getItem(ApiClient.getCurrentUserId(), id); }))).filter(Boolean);
+    function getPlaybackServerId() {
+        try {
+            return ApiClient && typeof ApiClient.serverId === 'function' ? ApiClient.serverId() : '';
+        } catch (_) {
+            return '';
+        }
+    }
+
+    function getPlaybackIds(results) {
+        var seen = Object.create(null);
+        return (results || []).map(function (item) { return String(prop(item, 'ItemId') || ''); }).filter(function (id) {
+            if (!id || seen[id]) return false;
+            seen[id] = true;
+            return true;
+        });
     }
 
     async function playResults(results, startItem) {
         var manager = getPlaybackManager();
-        var items;
-        try { items = await loadItems(results); } catch (_) { items = []; }
-        if (!manager || !items.length) { if (startItem) window.location.hash = '#!/details?id=' + encodeURIComponent(prop(startItem, 'ItemId')); return; }
-        var options = { items: items, autoplay: true };
+        var ids = getPlaybackIds(results);
+        var serverId = getPlaybackServerId();
+        if (!manager || !ids.length || !serverId) { if (startItem) window.location.hash = '#!/details?id=' + encodeURIComponent(prop(startItem, 'ItemId')); return; }
+        // Let Jellyfin's PlaybackManager fetch the complete DTO in one batch and
+        // construct the native playback queue. Fetching every item separately
+        // here can issue dozens of /Items/{id} requests and leave Play All stuck.
+        var options = { ids: ids, serverId: serverId, autoplay: true };
         if (startItem && prop(startItem, 'BestFrame')) options.startPositionTicks = Math.max(0, Number(prop(prop(startItem, 'BestFrame'), 'TimestampMs') || 0) * 10000);
-        manager.play(options);
+        try { await manager.play(options); } catch (error) { console.error('[Visual Search] playback failed', error); if (startItem) window.location.hash = '#!/details?id=' + encodeURIComponent(prop(startItem, 'ItemId')); }
     }
 
     async function queueResults(results) {
         var manager = getPlaybackManager();
         if (!manager) return;
-        var items;
-        try { items = await loadItems(results); } catch (_) { items = []; }
-        if (items.length) manager.queue({ items: items });
+        var ids = getPlaybackIds(results);
+        var serverId = getPlaybackServerId();
+        if (!ids.length || !serverId) return;
+        // Use the same batch path for queueing; PlaybackManager handles the
+        // current player and native queue semantics for us.
+        try { await manager.queue({ ids: ids, serverId: serverId }); } catch (error) { console.error('[Visual Search] queue failed', error); }
     }
 
     function applyCustomCode(results, query, preset) {
