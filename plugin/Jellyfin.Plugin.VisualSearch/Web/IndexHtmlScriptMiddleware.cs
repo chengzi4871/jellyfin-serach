@@ -9,7 +9,7 @@ namespace Jellyfin.Plugin.VisualSearch.Web;
 
 public sealed class IndexHtmlScriptMiddleware
 {
-    private const string Marker = "VisualSearch:begin";
+    private const string EndMarker = "<!-- VisualSearch:end -->";
     // Keep the script at the end of the document and load it synchronously. Some
     // embedded WebViews do not reliably execute a deferred script after a cached
     // index document is rewritten. The version query also busts an old script.
@@ -45,7 +45,19 @@ public sealed class IndexHtmlScriptMiddleware
             && context.Response.ContentType?.StartsWith("text/html", StringComparison.OrdinalIgnoreCase) == true)
         {
             var html = Encoding.UTF8.GetString(bytes);
-            if (!html.Contains(Marker, StringComparison.OrdinalIgnoreCase))
+            var beginMarker = html.IndexOf("<!-- VisualSearch:begin", StringComparison.OrdinalIgnoreCase);
+            var endMarker = beginMarker >= 0 ? html.IndexOf(EndMarker, beginMarker, StringComparison.OrdinalIgnoreCase) : -1;
+            if (beginMarker >= 0 && endMarker >= 0)
+            {
+                endMarker += EndMarker.Length;
+                var replacement = Snippet.Trim('\r', '\n');
+                html = html.Substring(0, beginMarker) + replacement + html.Substring(endMarker);
+                bytes = Encoding.UTF8.GetBytes(html);
+                context.Response.Headers.Remove(HeaderNames.ETag);
+                context.Response.ContentLength = bytes.Length;
+                rewritten = true;
+            }
+            else if (beginMarker < 0)
             {
                 var at = html.LastIndexOf("</body>", StringComparison.OrdinalIgnoreCase);
                 html = at >= 0 ? html.Insert(at, Snippet) : html + Snippet;
