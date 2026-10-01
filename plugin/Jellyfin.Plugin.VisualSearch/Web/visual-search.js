@@ -86,7 +86,10 @@
     }
 
     function isPlaybackRoute() {
-        var route = String(window.location.hash || window.location.pathname || '').toLowerCase();
+        // Stable Jellyfin uses a hash route while the experimental router uses
+        // pathname routes. Inspect both so the panel is not restored while the
+        // player is active just because the other route representation is stale.
+        var route = (String(window.location.hash || '') + ' ' + String(window.location.pathname || '')).toLowerCase();
         return /(?:^|[\/#!])video(?:[\/?#.]|$)/.test(route);
     }
 
@@ -200,25 +203,55 @@
         });
     }
 
+    function findNativePlaybackHost() {
+        var candidates = document.querySelectorAll('.itemsContainer');
+        for (var i = 0; i < candidates.length; i++) {
+            var candidate = candidates[i];
+            if (candidate.closest && candidate.closest('#' + panelId)) continue;
+            if (typeof candidate.enableMultiSelect === 'function') return candidate;
+        }
+        return null;
+    }
+
     function createPlaybackBridge(ids, serverId, action, startPositionTicks) {
-        var bridge;
-        try {
-            // Jellyfin 10.11 registers this legacy customized built-in element;
-            // its click handler is wired to the module-scoped PlaybackManager.
-            bridge = document.createElement('div', 'emby-itemscontainer');
-        } catch (_) { bridge = null; }
+        // Reuse a real Jellyfin items container whenever possible. Its click
+        // listener is already attached, so this path does not depend on the
+        // legacy custom-element upgrade timing.
+        var bridge = findNativePlaybackHost();
+        var ownsBridge = !bridge;
+        if (!bridge) {
+            try {
+                // Jellyfin 10.11 registers this legacy customized built-in;
+                // its click handler is wired to the module-scoped PlaybackManager.
+                bridge = document.createElement('div', 'emby-itemscontainer');
+            } catch (_) { bridge = null; }
+        }
         if (!bridge || typeof bridge.enableMultiSelect !== 'function') {
             try {
                 var modernBridge = document.createElement('div', { is: 'emby-itemscontainer' });
-                if (modernBridge && typeof modernBridge.enableMultiSelect === 'function') bridge = modernBridge;
+                if (modernBridge && typeof modernBridge.enableMultiSelect === 'function') {
+                    bridge = modernBridge;
+                    ownsBridge = true;
+                }
             } catch (_) { }
         }
         if (!bridge || typeof bridge.enableMultiSelect !== 'function') return null;
-        bridge.className = 'itemsContainer jf-vs-playback-bridge';
-        bridge.style.display = 'none';
+        var hadOwnFetchData = Object.prototype.hasOwnProperty.call(bridge, 'fetchData');
+        var originalFetchData = bridge.fetchData;
+        if (!ownsBridge) {
+            // Force playAllFromHere to use the temporary card IDs instead of
+            // replacing them with the underlying page's fetchData result.
+            try { bridge.fetchData = null; } catch (_) { return null; }
+        } else {
+            bridge.className = 'itemsContainer jf-vs-playback-bridge';
+            bridge.style.display = 'none';
+        }
+        bridge.__jfVisualSearchPlayback = { ownsBridge: ownsBridge, cards: [], hadOwnFetchData: hadOwnFetchData, originalFetchData: originalFetchData };
         ids.forEach(function (id, index) {
             var card = document.createElement('div');
-            card.className = 'itemAction';
+            // playAllFromHere groups cards by their first class name.
+            card.className = 'jf-vs-playback-action itemAction';
+            card.style.display = 'none';
             card.setAttribute('data-action', action);
             card.setAttribute('data-id', id);
             card.setAttribute('data-serverid', serverId);
@@ -227,9 +260,25 @@
             card.setAttribute('data-isfolder', 'false');
             if (index === 0 && startPositionTicks > 0) card.setAttribute('data-positionticks', String(startPositionTicks));
             bridge.appendChild(card);
+            bridge.__jfVisualSearchPlayback.cards.push(card);
         });
-        document.body.appendChild(bridge);
+        if (ownsBridge) document.body.appendChild(bridge);
         return bridge;
+    }
+
+    function cleanupPlaybackBridge(bridge) {
+        if (!bridge) return;
+        var state = bridge.__jfVisualSearchPlayback;
+        if (!state) return;
+        (state.cards || []).forEach(function (card) { if (card.parentNode === bridge) bridge.removeChild(card); });
+        if (state.ownsBridge) {
+            if (bridge.parentNode) bridge.parentNode.removeChild(bridge);
+        } else if (state.hadOwnFetchData) {
+            bridge.fetchData = state.originalFetchData;
+        } else {
+            try { delete bridge.fetchData; } catch (_) { bridge.fetchData = state.originalFetchData; }
+        }
+        delete bridge.__jfVisualSearchPlayback;
     }
 
     function dispatchPlaybackBridge(ids, serverId, startItem, queue) {
@@ -241,31 +290,52 @@
         var bridge = createPlaybackBridge(ids, serverId, action, startPositionTicks);
         if (!bridge || !bridge.firstElementChild) return false;
         var firstCard = bridge.firstElementChild;
-        try {
-            firstCard.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true, view: window }));
-            // PlaybackManager consumes the item attributes synchronously. Keep
-            // the bridge briefly so delayed event handlers can finish cleanly.
-            window.setTimeout(function () { if (bridge.parentNode) bridge.parentNode.removeChild(bridge); }, 1000);
-            return true;
-        } catch (error) {
-            if (bridge.parentNode) bridge.parentNode.removeChild(bridge);
-            console.error('[Visual Search] playback bridge failed', error);
-            return false;
-        }
+        // webcomponents.js upgrades legacy customized built-ins from a
+        // MutationObserver. Dispatch after the element has been attached so
+        // Jellyfin's itemShortcuts listener is already registered.
+        return new Promise(function (resolve) {
+            var trigger = function () {
+                try {
+                    var event;
+                    try {
+                        event = new MouseEvent('click', { bubbles: true, cancelable: true, view: window });
+                    } catch (_) {
+                        event = document.createEvent('MouseEvents');
+                        event.initMouseEvent('click', true, true, window, 1, 0, 0, 0, 0, false, false, false, false, 0, null);
+                    }
+                    firstCard.dispatchEvent(event);
+                    // PlaybackManager copies the card attributes before its
+                    // asynchronous item lookup starts. Keep the bridge long
+                    // enough for that lookup to be scheduled, then detach it.
+                    window.setTimeout(function () { cleanupPlaybackBridge(bridge); }, 2000);
+                    resolve(true);
+                } catch (error) {
+                    cleanupPlaybackBridge(bridge);
+                    console.error('[Visual Search] playback bridge failed', error);
+                    resolve(false);
+                }
+            };
+            if (window.requestAnimationFrame) window.requestAnimationFrame(function () { window.setTimeout(trigger, 0); });
+            else window.setTimeout(trigger, 0);
+        });
     }
 
     async function playResults(results, startItem) {
-        suspendPanelForPlayback();
         var ids = getPlaybackIds(results);
         var serverId = getPlaybackServerId();
+        if (!ids.length || !serverId) {
+            console.error('[Visual Search] unable to start playback', { hasServerId: !!serverId, itemCount: ids.length });
+            return;
+        }
+        suspendPanelForPlayback();
         var manager = getPlaybackManager();
         if (manager && ids.length && serverId) {
             try { await manager.play({ ids: ids, serverId: serverId, autoplay: true, startPositionTicks: startItem && prop(startItem, 'BestFrame') ? Math.max(0, Number(prop(prop(startItem, 'BestFrame'), 'TimestampMs') || 0) * 10000) : 0 }); return; }
             catch (error) { console.warn('[Visual Search] direct playback unavailable, using Jellyfin bridge', error); }
         }
-        if (!dispatchPlaybackBridge(ids, serverId, startItem, false) && startItem) {
+        if (!await dispatchPlaybackBridge(ids, serverId, startItem, false)) {
+            restorePanelAfterPlayback();
             console.error('[Visual Search] unable to start playback', { hasServerId: !!serverId, itemCount: ids.length });
-            window.location.hash = '#!/details?id=' + encodeURIComponent(prop(startItem, 'ItemId'));
         }
     }
 
@@ -277,7 +347,7 @@
             try { await manager.queue({ ids: ids, serverId: serverId }); return; }
             catch (error) { console.warn('[Visual Search] direct queue unavailable, using Jellyfin bridge', error); }
         }
-        if (!dispatchPlaybackBridge(ids, serverId, null, true)) console.error('[Visual Search] unable to queue playback', { hasServerId: !!serverId, itemCount: ids.length });
+        if (!await dispatchPlaybackBridge(ids, serverId, null, true)) console.error('[Visual Search] unable to queue playback', { hasServerId: !!serverId, itemCount: ids.length });
     }
 
     function applyCustomCode(results, query, preset) {
