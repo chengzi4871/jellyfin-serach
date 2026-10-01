@@ -50,10 +50,22 @@ public sealed class PluginConfiguration : BasePluginConfiguration
     public bool FrameDeduplicationEnabled { get; set; } = true;
     /// <summary>Use a small sparse probe pass to prefer scene boundaries on long videos.</summary>
     public bool SceneChangeSamplingEnabled { get; set; } = true;
+    /// <summary>Maximum sparse local probes used to choose scene-diverse frames. Only the final frame cap is embedded.</summary>
+    public int SceneProbeFrames { get; set; } = 72;
     /// <summary>Use Jellyfin's Primary image as the visual fallback when no usable Trickplay frame exists.</summary>
     public bool CoverFallbackEnabled { get; set; } = true;
     /// <summary>Maximum number of cards returned to the semantic results page.</summary>
     public int SearchResultLimit { get; set; } = 30;
+    /// <summary>Number of video groups recalled before candidate-modalities are refined.</summary>
+    public int SearchCandidateLimit { get; set; } = 400;
+    /// <summary>Number of best frames returned per video group during the first visual recall.</summary>
+    public int SearchGroupSize { get; set; } = 4;
+    /// <summary>Qdrant HNSW search depth for approximate search. Ignored when exact search is enabled.</summary>
+    public int SearchHnswEf { get; set; } = 512;
+    /// <summary>Use Qdrant exact vector search for higher recall at the cost of latency.</summary>
+    public bool SearchExact { get; set; } = false;
+    /// <summary>Maximum candidate videos sent to browser-side custom scoring and sorting.</summary>
+    public int SearchCustomCandidateLimit { get; set; } = 500;
     /// <summary>Built-in or custom preset id selected when the search panel opens.</summary>
     public string DefaultSearchPresetId { get; set; } = "balanced";
     /// <summary>Comma separated ids exposed in the search panel. Empty means all built-ins and custom definitions.</summary>
@@ -74,4 +86,9 @@ public sealed class PluginConfiguration : BasePluginConfiguration
     public int IndexRetryDelaySeconds { get; set; } = 15;
 
     public int GetEffectiveMaxFramesPerVideo() => Math.Clamp(MaxFramesPerVideo > 0 ? MaxFramesPerVideo : FramesPerVideo, 1, 100);
+    public int GetEffectiveSceneProbeFrames() => Math.Clamp(SceneProbeFrames > 0 ? SceneProbeFrames : 72, GetEffectiveMaxFramesPerVideo(), 200);
+    public int GetEffectiveSearchCandidateLimit() => Math.Clamp(SearchCandidateLimit > 0 ? SearchCandidateLimit : 400, 30, 2000);
+    public int GetEffectiveSearchGroupSize() => Math.Clamp(SearchGroupSize > 0 ? SearchGroupSize : 4, 1, 100);
+    public int GetEffectiveSearchHnswEf() => Math.Clamp(SearchHnswEf > 0 ? SearchHnswEf : 512, 1, 10000);
+    public int GetEffectiveSearchCustomCandidateLimit() => Math.Clamp(SearchCustomCandidateLimit > 0 ? SearchCustomCandidateLimit : 500, 30, 2000);
 }

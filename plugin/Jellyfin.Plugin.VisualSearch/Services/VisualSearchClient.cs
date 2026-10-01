@@ -351,6 +351,71 @@ public sealed class VisualSearchClient
         await EnsureSuccessWithDetailsAsync(response, $"Qdrant delete ({collection})").ConfigureAwait(false);
     }
 
+    /// <summary>
+    /// Deletes points for an item that are no longer part of the newly indexed
+    /// point set. The new points must be upserted first, so an indexing retry
+    /// never leaves the item without its current vectors.
+    /// </summary>
+    public async Task DeleteByItemExceptAsync(string collection, string itemId, IReadOnlyCollection<string> keepPointIds, CancellationToken cancellationToken)
+    {
+        if (string.IsNullOrWhiteSpace(itemId)) return;
+        var keep = new HashSet<string>(keepPointIds.Where(x => !string.IsNullOrWhiteSpace(x)), StringComparer.OrdinalIgnoreCase);
+        var all = await ScrollPointIdsByItemAsync(collection, itemId, cancellationToken).ConfigureAwait(false);
+        var stale = all.Where(x => !keep.Contains(x)).ToArray();
+        foreach (var chunk in stale.Chunk(256))
+        {
+            var config = _configurationProvider();
+            using var response = await _http.PostAsJsonAsync(
+                GetQdrantUrl(config) + "/collections/" + Uri.EscapeDataString(collection) + "/points/delete?wait=true",
+                new { points = chunk },
+                cancellationToken).ConfigureAwait(false);
+            if (response.StatusCode == HttpStatusCode.NotFound) return;
+            await EnsureSuccessWithDetailsAsync(response, $"Qdrant stale-point delete ({collection})").ConfigureAwait(false);
+        }
+    }
+
+    private async Task<IReadOnlyList<string>> ScrollPointIdsByItemAsync(string collection, string itemId, CancellationToken cancellationToken)
+    {
+        var result = new List<string>();
+        JsonElement? offset = null;
+        while (true)
+        {
+            var config = _configurationProvider();
+            var body = new Dictionary<string, object?>
+            {
+                ["filter"] = new
+                {
+                    must = new[] { new { key = "itemId", match = new { value = itemId } } }
+                },
+                ["limit"] = 1000,
+                ["with_payload"] = false,
+                ["with_vector"] = false
+            };
+            if (offset.HasValue) body["offset"] = offset.Value;
+            using var response = await _http.PostAsJsonAsync(
+                GetQdrantUrl(config) + "/collections/" + Uri.EscapeDataString(collection) + "/points/scroll",
+                body,
+                cancellationToken).ConfigureAwait(false);
+            if (response.StatusCode == HttpStatusCode.NotFound) return result;
+            await EnsureSuccessWithDetailsAsync(response, $"Qdrant scroll ({collection})").ConfigureAwait(false);
+            using var document = JsonDocument.Parse(await response.Content.ReadAsStreamAsync(cancellationToken).ConfigureAwait(false));
+            if (!document.RootElement.TryGetProperty("result", out var scrollResult) || scrollResult.ValueKind != JsonValueKind.Object) break;
+            if (scrollResult.TryGetProperty("points", out var points) && points.ValueKind == JsonValueKind.Array)
+            {
+                foreach (var point in points.EnumerateArray())
+                {
+                    if (!point.TryGetProperty("id", out var id)) continue;
+                    var text = id.ValueKind == JsonValueKind.String ? id.GetString() : id.ToString();
+                    if (!string.IsNullOrWhiteSpace(text)) result.Add(text);
+                }
+            }
+            if (!scrollResult.TryGetProperty("next_page_offset", out var next) || next.ValueKind is JsonValueKind.Null or JsonValueKind.Undefined)
+                break;
+            offset = next.Clone();
+        }
+        return result;
+    }
+
     public async Task EnsureCollectionsAsync(CancellationToken cancellationToken)
     {
         var config = _configurationProvider();
@@ -366,15 +431,29 @@ public sealed class VisualSearchClient
                 using var document = JsonDocument.Parse(await existing.Content.ReadAsStreamAsync(cancellationToken).ConfigureAwait(false));
                 if (TryReadCollectionDimension(document.RootElement, out var existingDimension) && config.EmbeddingDimension > 0 && existingDimension != config.EmbeddingDimension)
                     throw new VisualSearchConfigurationException($"Qdrant collection '{collection}' dimension mismatch: actual dimension={existingDimension}, configured dimension={config.EmbeddingDimension}. Delete collection '{collection}' in Qdrant, then click '初始化 Qdrant' to recreate it before indexing.");
+                await EnsurePayloadIndexAsync(url, "itemId", cancellationToken).ConfigureAwait(false);
+                await EnsurePayloadIndexAsync(url, "libraryId", cancellationToken).ConfigureAwait(false);
                 continue;
             }
             if (existing.StatusCode != HttpStatusCode.NotFound)
                 await EnsureSuccessWithDetailsAsync(existing, $"Qdrant collection check ({collection})").ConfigureAwait(false);
 
             using var response = await _http.PutAsJsonAsync(url, body, cancellationToken).ConfigureAwait(false);
-            if (response.StatusCode == HttpStatusCode.Conflict) continue;
-            await EnsureSuccessWithDetailsAsync(response, $"Qdrant collection create ({collection})").ConfigureAwait(false);
+            if (response.StatusCode != HttpStatusCode.Conflict)
+                await EnsureSuccessWithDetailsAsync(response, $"Qdrant collection create ({collection})").ConfigureAwait(false);
+            await EnsurePayloadIndexAsync(url, "itemId", cancellationToken).ConfigureAwait(false);
+            await EnsurePayloadIndexAsync(url, "libraryId", cancellationToken).ConfigureAwait(false);
         }
+    }
+
+    private async Task EnsurePayloadIndexAsync(string collectionUrl, string fieldName, CancellationToken cancellationToken)
+    {
+        using var response = await _http.PutAsJsonAsync(
+            collectionUrl + "/index?wait=true",
+            new { field_name = fieldName, field_schema = "keyword" },
+            cancellationToken).ConfigureAwait(false);
+        if (response.StatusCode == HttpStatusCode.Conflict) return;
+        await EnsureSuccessWithDetailsAsync(response, $"Qdrant payload index ({fieldName})").ConfigureAwait(false);
     }
 
     private static async Task EnsureSuccessWithDetailsAsync(HttpResponseMessage response, string operation)
@@ -402,34 +481,95 @@ public sealed class VisualSearchClient
             && size.TryGetInt32(out dimension);
     }
 
-    public async Task<IReadOnlyList<RemoteSearchHit>> SearchAsync(float[] vector, string collection, int limit, CancellationToken cancellationToken, IReadOnlyList<string>? libraryIds = null)
+    public async Task<IReadOnlyList<RemoteSearchHit>> SearchAsync(
+        float[] vector,
+        string collection,
+        int limit,
+        CancellationToken cancellationToken,
+        IReadOnlyList<string>? libraryIds = null,
+        int hnswEf = 0,
+        bool exact = false,
+        IReadOnlyList<string>? itemIds = null)
     {
         var config = _configurationProvider();
-        var ids = libraryIds?.Where(x => !string.IsNullOrWhiteSpace(x)).Select(x => x.Trim()).Distinct(StringComparer.OrdinalIgnoreCase).ToArray() ?? Array.Empty<string>();
-        object body = ids.Length == 0
-            ? new { vector, limit, with_payload = true }
-            : new
-            {
-                vector,
-                limit,
-                with_payload = true,
-                filter = new
-                {
-                    should = ids.Select(id => (object)new { key = "libraryId", match = new { value = id } }).ToArray()
-                }
-            };
+        var body = BuildSearchBody(vector, limit, libraryIds, itemIds, hnswEf, exact);
         using var response = await _http.PostAsJsonAsync(GetQdrantUrl(config) + "/collections/" + Uri.EscapeDataString(collection) + "/points/search", body, cancellationToken).ConfigureAwait(false);
         await EnsureSuccessWithDetailsAsync(response, $"Qdrant search ({collection})").ConfigureAwait(false);
         using var document = JsonDocument.Parse(await response.Content.ReadAsStreamAsync(cancellationToken).ConfigureAwait(false));
         return ParseSearchHits(document.RootElement);
     }
 
-    /// <summary>Searches an optional collection, treating a not-yet-created collection as empty.</summary>
-    public async Task<IReadOnlyList<RemoteSearchHit>> SearchOptionalAsync(float[] vector, string collection, int limit, CancellationToken cancellationToken, IReadOnlyList<string>? libraryIds = null)
+    /// <summary>
+    /// Recalls a bounded number of videos rather than allowing one video's
+    /// frames to consume the entire visual candidate budget. Qdrant 1.13.x
+    /// groups by the indexed itemId payload field.
+    /// </summary>
+    public async Task<IReadOnlyList<RemoteSearchGroup>> SearchGroupedAsync(
+        float[] vector,
+        string collection,
+        int groupLimit,
+        int groupSize,
+        CancellationToken cancellationToken,
+        IReadOnlyList<string>? libraryIds = null,
+        int hnswEf = 0,
+        bool exact = false)
+    {
+        var config = _configurationProvider();
+        var body = BuildSearchBody(vector, groupLimit, libraryIds, null, hnswEf, exact);
+        var grouped = new Dictionary<string, object?>(StringComparer.Ordinal);
+        grouped["vector"] = vector;
+        grouped["group_by"] = "itemId";
+        grouped["limit"] = Math.Clamp(groupLimit, 1, 10000);
+        grouped["group_size"] = Math.Clamp(groupSize, 1, 100);
+        grouped["with_payload"] = true;
+        if (body is Dictionary<string, object?> searchBody)
+        {
+            if (searchBody.TryGetValue("filter", out var filter)) grouped["filter"] = filter;
+            if (searchBody.TryGetValue("params", out var parameters)) grouped["params"] = parameters;
+        }
+        using var response = await _http.PostAsJsonAsync(GetQdrantUrl(config) + "/collections/" + Uri.EscapeDataString(collection) + "/points/search/groups", grouped, cancellationToken).ConfigureAwait(false);
+        if (response.StatusCode == HttpStatusCode.NotFound)
+        {
+            // Keep the feature usable against a pre-1.13 server: the fallback
+            // still limits the number of returned frames, then groups locally.
+            var fallback = await SearchAsync(vector, collection, Math.Min(10000, Math.Max(1, groupLimit * groupSize)), cancellationToken, libraryIds, hnswEf, exact).ConfigureAwait(false);
+            return fallback.GroupBy(x => x.ItemId, StringComparer.Ordinal)
+                .Take(groupLimit)
+                .Select(group => new RemoteSearchGroup(group.Key, group.Take(groupSize).ToArray()))
+                .ToArray();
+        }
+        await EnsureSuccessWithDetailsAsync(response, $"Qdrant grouped search ({collection})").ConfigureAwait(false);
+        using var document = JsonDocument.Parse(await response.Content.ReadAsStreamAsync(cancellationToken).ConfigureAwait(false));
+        return ParseGroupedSearchHits(document.RootElement, groupSize);
+    }
+
+    /// <summary>Grouped search for an optional collection such as the cover fallback collection.</summary>
+    public async Task<IReadOnlyList<RemoteSearchGroup>> SearchGroupedOptionalAsync(
+        float[] vector,
+        string collection,
+        int groupLimit,
+        int groupSize,
+        CancellationToken cancellationToken,
+        IReadOnlyList<string>? libraryIds = null,
+        int hnswEf = 0,
+        bool exact = false)
     {
         try
         {
-            return await SearchAsync(vector, collection, limit, cancellationToken, libraryIds).ConfigureAwait(false);
+            return await SearchGroupedAsync(vector, collection, groupLimit, groupSize, cancellationToken, libraryIds, hnswEf, exact).ConfigureAwait(false);
+        }
+        catch (HttpRequestException ex) when (ex.StatusCode == HttpStatusCode.NotFound)
+        {
+            return Array.Empty<RemoteSearchGroup>();
+        }
+    }
+
+    /// <summary>Searches an optional collection, treating a not-yet-created collection as empty.</summary>
+    public async Task<IReadOnlyList<RemoteSearchHit>> SearchOptionalAsync(float[] vector, string collection, int limit, CancellationToken cancellationToken, IReadOnlyList<string>? libraryIds = null, int hnswEf = 0, bool exact = false, IReadOnlyList<string>? itemIds = null)
+    {
+        try
+        {
+            return await SearchAsync(vector, collection, limit, cancellationToken, libraryIds, hnswEf, exact, itemIds).ConfigureAwait(false);
         }
         catch (HttpRequestException ex) when (ex.StatusCode == HttpStatusCode.NotFound)
         {
@@ -464,6 +604,72 @@ public sealed class VisualSearchClient
             hits.Add(new RemoteSearchHit(id.GetString() ?? string.Empty, scoreValue, payload.Clone()));
         }
         return hits;
+    }
+
+    internal static IReadOnlyList<RemoteSearchGroup> ParseGroupedSearchHits(JsonElement root, int groupSize)
+    {
+        var groups = new List<RemoteSearchGroup>();
+        if (!root.TryGetProperty("result", out var result)
+            || result.ValueKind != JsonValueKind.Object
+            || !result.TryGetProperty("groups", out var groupArray)
+            || groupArray.ValueKind != JsonValueKind.Array)
+            return groups;
+        foreach (var group in groupArray.EnumerateArray())
+        {
+            if (!group.TryGetProperty("id", out var groupId)) continue;
+            var groupText = groupId.ValueKind == JsonValueKind.String ? groupId.GetString() : groupId.ToString();
+            if (string.IsNullOrWhiteSpace(groupText) || !group.TryGetProperty("hits", out var hits) || hits.ValueKind != JsonValueKind.Array) continue;
+            var parsed = new List<RemoteSearchHit>();
+            foreach (var hit in hits.EnumerateArray().Take(Math.Clamp(groupSize, 1, 100)))
+            {
+                var item = ParseSearchHit(hit);
+                if (item is not null) parsed.Add(item);
+            }
+            if (parsed.Count > 0) groups.Add(new RemoteSearchGroup(groupText!, parsed));
+        }
+        return groups;
+    }
+
+    private static object BuildSearchBody(float[] vector, int limit, IReadOnlyList<string>? libraryIds, IReadOnlyList<string>? itemIds, int hnswEf, bool exact)
+    {
+        var body = new Dictionary<string, object?>
+        {
+            ["vector"] = vector,
+            ["limit"] = Math.Clamp(limit, 1, 100000),
+            ["with_payload"] = true
+        };
+        var filter = BuildFilter(libraryIds, itemIds);
+        if (filter is not null) body["filter"] = filter;
+        var parameters = BuildSearchParams(hnswEf, exact);
+        if (parameters is not null) body["params"] = parameters;
+        return body;
+    }
+
+    private static object? BuildFilter(IReadOnlyList<string>? libraryIds, IReadOnlyList<string>? itemIds)
+    {
+        var libraries = libraryIds?.Where(x => !string.IsNullOrWhiteSpace(x)).Select(x => x.Trim()).Distinct(StringComparer.OrdinalIgnoreCase).ToArray() ?? Array.Empty<string>();
+        var items = itemIds?.Where(x => !string.IsNullOrWhiteSpace(x)).Select(x => x.Trim()).Distinct(StringComparer.OrdinalIgnoreCase).ToArray() ?? Array.Empty<string>();
+        var must = new List<object>();
+        if (libraries.Length > 0) must.Add(new { key = "libraryId", match = new { any = libraries } });
+        if (items.Length > 0) must.Add(new { key = "itemId", match = new { any = items } });
+        return must.Count == 0 ? null : new { must = must.ToArray() };
+    }
+
+    private static object? BuildSearchParams(int hnswEf, bool exact)
+    {
+        if (exact) return new { exact = true };
+        return hnswEf > 0 ? new { hnsw_ef = Math.Clamp(hnswEf, 1, 10000) } : null;
+    }
+
+    private static RemoteSearchHit? ParseSearchHit(JsonElement hit)
+    {
+        if (!hit.TryGetProperty("payload", out var payload)
+            || payload.ValueKind != JsonValueKind.Object
+            || !payload.TryGetProperty("itemId", out var id)
+            || id.ValueKind != JsonValueKind.String
+            || !hit.TryGetProperty("score", out var score)
+            || !score.TryGetDouble(out var scoreValue)) return null;
+        return new RemoteSearchHit(id.GetString() ?? string.Empty, scoreValue, payload.Clone());
     }
 
     private static PluginConfiguration GetConfig() => Plugin.Instance?.Configuration ?? new PluginConfiguration();
@@ -579,6 +785,7 @@ public sealed record WorkerHealth
     public string Device { get; init; } = "cloud";
 }
 public sealed record RemoteSearchHit(string ItemId, double Score, JsonElement Payload);
+public sealed record RemoteSearchGroup(string ItemId, IReadOnlyList<RemoteSearchHit> Hits);
 internal sealed class QueryCacheEntry
 {
     public QueryCacheEntry(float[] vector, DateTime createdAt, DateTime lastAccessAt)

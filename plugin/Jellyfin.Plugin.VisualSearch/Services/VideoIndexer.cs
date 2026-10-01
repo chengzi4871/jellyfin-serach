@@ -82,6 +82,13 @@ public sealed class VideoIndexer
             // became available. Keep the source unambiguous once real frames exist.
             await _client.DeleteByItemAsync("jellyfin_video_covers", video.Id.ToString(), cancellationToken).ConfigureAwait(false);
             await _client.UpsertAsync("jellyfin_video_frames", frames, cancellationToken).ConfigureAwait(false);
+            // A changed sampling configuration can select different frame
+            // indices. Remove only points that were not part of this successful
+            // upsert, so old samples cannot inflate later search scores.
+            var currentFrameIds = frameSamples
+                .Select(x => DeterministicId(video.Id, x.Sample.FrameIndex))
+                .ToArray();
+            await _client.DeleteByItemExceptAsync("jellyfin_video_frames", video.Id.ToString(), currentFrameIds, cancellationToken).ConfigureAwait(false);
             _state.RecordFrameSuccess(frames.Count);
         }
         else
@@ -255,10 +262,10 @@ public sealed class VideoIndexer
         var sampleCount = Math.Min(info.ThumbnailCount, Math.Min(cap, Math.Max(6, target)));
         var sceneSampling = Plugin.Instance?.Configuration.SceneChangeSamplingEnabled != false
             && cap >= 8 && estimatedSeconds >= 300;
-        // Long videos get at most a 2x sparse probe pass, capped at 24 frames. The
+        // Long videos get a configurable sparse probe pass (default 72). The
         // extra probes are discarded locally; only the selected frames reach Embedding.
         var probeCount = sceneSampling
-            ? Math.Min(info.ThumbnailCount, Math.Min(24, Math.Max(sampleCount, cap * 2)))
+            ? Math.Min(info.ThumbnailCount, Math.Max(sampleCount, Plugin.Instance?.Configuration.GetEffectiveSceneProbeFrames() ?? Math.Max(cap * 3, 72)))
             : sampleCount;
         var indices = Enumerable.Range(0, probeCount).Select(i => probeCount == 1 ? 0 : (int)Math.Round(i * (info.ThumbnailCount - 1d) / (probeCount - 1))).Distinct().ToList();
         var kept = new List<FrameSample>();

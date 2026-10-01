@@ -166,10 +166,14 @@
 
     function renderResults(container, data, query, sortMode) {
         var results = prop(data, 'Results');
-        results = Array.isArray(results) ? sortResults(results, sortMode || 'score') : [];
+        results = Array.isArray(results) ? results.slice() : [];
         var presetId = String(prop(data, 'PresetId') || '').toLowerCase();
         var preset = (settings.presets || []).filter(function (item) { return String(prop(item, 'Id') || '').toLowerCase() === presetId; })[0];
-        results = applyCustomCode(results, query, preset);
+        var isCustom = preset && String(prop(preset, 'Mode') || prop(preset, 'mode') || '').toLowerCase() === 'custom';
+        // Custom code receives the complete server-side candidate pool first;
+        // only its final output is limited to the number shown in the panel.
+        results = isCustom ? applyCustomCode(results, query, preset) : sortResults(results, sortMode || 'score');
+        results = results.slice(0, Math.max(1, Math.min(100, Number(prop(data, 'ResultLimit') || settings.resultLimit || 30))));
         container.__jfResults = results;
         if (!results.length) { renderEmpty(container, '没有找到相近的视频', '可以换一种描述，例如人物、颜色、地点或动作。'); return 0; }
         var display = settings.display || {};

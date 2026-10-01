@@ -84,6 +84,33 @@ public sealed class SearchPayloadTests
         Assert.Empty(hits);
     }
 
+    [Fact]
+    public void GroupedSearchPayloadIsParsedIntoVideoGroups()
+    {
+        using var document = JsonDocument.Parse("""
+        {
+          "result": {
+            "groups": [
+              {
+                "id": "11111111-1111-1111-1111-111111111111",
+                "hits": [
+                  {"id":"frame-2","score":0.93,"payload":{"itemId":"11111111-1111-1111-1111-111111111111","frameIndex":2}},
+                  {"id":"frame-1","score":0.88,"payload":{"itemId":"11111111-1111-1111-1111-111111111111","frameIndex":1}}
+                ]
+              }
+            ]
+          }
+        }
+        """);
+
+        var groups = VisualSearchClient.ParseGroupedSearchHits(document.RootElement, 4);
+
+        var group = Assert.Single(groups);
+        Assert.Equal("11111111-1111-1111-1111-111111111111", group.ItemId);
+        Assert.Equal(2, group.Hits.Count);
+        Assert.Equal(2, group.Hits[0].Payload.GetProperty("frameIndex").GetInt32());
+    }
+
     private sealed class StubHandler : HttpMessageHandler
     {
         private readonly string _response;

@@ -40,9 +40,9 @@ meta.json
 不要把 `MediaBrowser.*`、`Jellyfin.*`、`Microsoft.Extensions.*` 或 EntityFrameworkCore 等框架副本复制进插件目录，否则可能出现程序集加载后插件实例无法创建、后台不显示且日志不明显报错的问题。
 
 ```bash
-rm -rf ~/docker/jellyfin/config/data/plugins/VisualSearch_0.1.0.7
-mkdir -p ~/docker/jellyfin/config/data/plugins/VisualSearch_0.1.0.7
-unzip visual-search-plugin.zip -d ~/docker/jellyfin/config/data/plugins/VisualSearch_0.1.0.7
+rm -rf ~/docker/jellyfin/config/data/plugins/VisualSearch_0.1.0.8
+mkdir -p ~/docker/jellyfin/config/data/plugins/VisualSearch_0.1.0.8
+unzip visual-search-plugin.zip -d ~/docker/jellyfin/config/data/plugins/VisualSearch_0.1.0.8
 docker restart jellyfin
 ```
 
@@ -60,7 +60,7 @@ docker restart jellyfin
 
 ## 采样、去重和排序
 
-插件通过 Jellyfin 10.11 的 `ITrickplayManager` 读取 Trickplay 元数据，从拼图中裁剪单独帧，不重新解码原视频。读取时按照库的 `SaveTrickplayWithMedia` 设置优先查找媒体旁目录，并回退查找 Jellyfin 本地目录，避免迁移过程中漏掉数据。语义验收通过 `GetTrickplayItemsAsync` 只从已有 Trickplay 的视频中随机选择。短视频按约 30 秒覆盖一个时间点，基础采样至少 6 帧；约 5 分钟以上的长视频可启用场景变化采样，最多读取 24 个稀疏探针，用 8×8 颜色指纹和 dHash 估计镜头变化，再以场景变化优先、时间覆盖补充的方式选择最终帧。相同 tile 在一次读取中只解码一次，探针不会全部发送到云端；`单视频最大截图量` 是最终硬上限，不表示固定采样数。发送云端前可用配置开关启用轻量 dHash 和颜色差异近重复过滤，并保留首帧和末帧。
+插件通过 Jellyfin 10.11 的 `ITrickplayManager` 读取 Trickplay 元数据，从拼图中裁剪单独帧，不重新解码原视频。读取时按照库的 `SaveTrickplayWithMedia` 设置优先查找媒体旁目录，并回退查找 Jellyfin 本地目录，避免迁移过程中漏掉数据。语义验收通过 `GetTrickplayItemsAsync` 只从已有 Trickplay 的视频中随机选择。短视频按约 30 秒覆盖一个时间点，基础采样至少 6 帧；约 5 分钟以上的长视频可启用场景变化采样，默认读取 72 个稀疏探针，用 8×8 颜色指纹和 dHash 估计镜头变化，再以场景变化优先、时间覆盖补充的方式选择最终帧。相同 tile 在一次读取中只解码一次，探针不会全部发送到云端；`单视频最大截图量` 是最终硬上限，不表示固定采样数。发送云端前可用配置开关启用轻量 dHash 和颜色差异近重复过滤，并保留首帧和末帧。重新采样后会清理该视频不再使用的旧帧点，避免历史采样残留影响搜索。
 
 索引状态页每 3 秒刷新一次，显示运行类型、阶段、视频总进度、当前视频、当前帧、Embedding 批次、已完成输入、请求数、处理速度、预计剩余时间、自动重试和永久失败数量；取帧失败原因也会按类别汇总。
 
@@ -69,7 +69,7 @@ docker restart jellyfin
 VisualScore = 0.50 × BestFrame + 0.30 × Top3Average + 0.20 × Top5Average
 FinalScore = VisualScore × 0.75 + TitleScore × 0.25
 
-标题和画面结果先分别做 P10～P90 归一化，再参与融合；返回给前端的综合、画面和标题分数均为 0～1 的归一化分数。
+标题和画面候选先按当前精排候选集的实际分数范围归一化，再参与融合；不再把前 10% 的强匹配全部截成 1。返回给前端的综合、画面和标题分数均为 0～1 的归一化分数，`rawVisualScore` 保留 Embedding/Qdrant 原始视觉分数聚合值，便于自定义代码自行判断。
 ```
 
 缺少某一模态时会自动重新归一化；内置综合搜索对缺失模态结果使用固定 0.65 系数。Primary 封面在内置综合搜索中按普通视觉来源参与，不额外降低可靠性；自定义预设可通过 `coverScoreMultiplier` 选择性调整封面视觉分。取帧失败会记录 `tile_missing`、`tile_read_error` 等原因，并在索引状态中单独统计。
@@ -89,7 +89,7 @@ FinalScore = VisualScore × 0.75 + TitleScore × 0.25
 ]
 ```
 
-自定义评分和排序代码在结果页浏览器端运行，函数体签名为 `function(items, query, preset, helpers)`，必须返回数组。`items` 中有 `score`、`rawVisualScore`、`visualScore`、`titleScore`、`visualSource`、`bestFrame`、`matchKind` 等字段，可以写入 `item.customScore` 后自行排序；`visualSource` 为 `trickplay` 或 `primary_cover`，`helpers.isCover(item)` 可直接判断封面来源。JSON 预设中的 `coverScoreMultiplier` 只对封面视觉分生效，默认 1。`helpers` 提供 `clamp`、`scoreText` 和 `timestamp`。配置页的“检查自定义代码”会用示例候选执行一次，搜索页发生异常时会显示错误而不会破坏内置配置。
+自定义评分和排序代码在结果页浏览器端运行，函数体签名为 `function(items, query, preset, helpers)`，必须返回数组。服务端会先按视频分组召回候选，再补查这些视频的标题、全部已索引帧和封面；自定义模式会把候选池交给浏览器代码，执行完成后才截取最终显示数量。`items` 中有 `score`、`rawVisualScore`、`visualScore`、`titleScore`、`visualSource`、`bestFrame`、`matchKind` 等字段，可以写入 `item.customScore` 后自行排序；`visualSource` 为 `trickplay` 或 `primary_cover`，`helpers.isCover(item)` 可直接判断封面来源。JSON 预设中的 `coverScoreMultiplier` 只对封面视觉分生效，默认 1。配置页的“候选数量”“每视频首轮帧数”“HNSW 搜索深度”和“精确搜索”用于控制召回质量与耗时；精确搜索会使用 Qdrant 1.13.x 的 `exact=true`。`helpers` 提供 `clamp`、`scoreText` 和 `timestamp`。配置页的“检查自定义代码”会用示例候选执行一次，搜索页发生异常时会显示错误而不会破坏内置配置。
 
 ## API 和兼容性
 
