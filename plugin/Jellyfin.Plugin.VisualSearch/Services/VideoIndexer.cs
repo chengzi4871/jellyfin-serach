@@ -40,9 +40,11 @@ public sealed class VideoIndexer
         var manifest = await _trickplay.GetTrickplayManifest(video).ConfigureAwait(false);
         var textHash = IndexFingerprint.ComputeTextHash(video, configuration);
         var visualHash = IndexFingerprint.ComputeVisualHash(video, configuration, manifest);
+        var visualMarker = IndexFingerprint.ComputeVisualMarker(video, configuration);
         var existing = forceRebuild ? null : await _client.GetIndexedSignatureAsync(video.Id.ToString(), cancellationToken).ConfigureAwait(false);
-        var textChanged = forceRebuild || existing?.TextHash != textHash;
-        var visualChanged = forceRebuild || existing?.VisualHash != visualHash;
+        var signatureVersionChanged = existing?.HashVersion != IndexFingerprint.Version;
+        var textChanged = forceRebuild || signatureVersionChanged || existing?.TextHash != textHash;
+        var visualChanged = forceRebuild || signatureVersionChanged || existing?.VisualHash != visualHash || existing?.VisualMarker != visualMarker;
         if (!textChanged && !visualChanged)
         {
             _state.SetStage("skipped_unchanged", 0, 0, 0);
@@ -65,7 +67,7 @@ public sealed class VideoIndexer
                 {
                     id = video.Id.ToString(),
                     vector = titleVector,
-                    payload = BuildTextPayload(video, libraryId, textHash, visualChanged ? existing?.VisualHash : visualHash)
+                    payload = BuildTextPayload(video, libraryId, textHash, visualChanged ? existing?.VisualHash : visualHash, visualChanged ? existing?.VisualMarker : visualMarker)
                 }
             }, cancellationToken).ConfigureAwait(false);
         }
@@ -99,7 +101,7 @@ public sealed class VideoIndexer
         for (var i = 0; i < frameSamples.Count; i++)
         {
             var sample = frameSamples[i].Sample;
-            frames.Add(new { id = DeterministicId(video.Id, sample.FrameIndex), vector = imageVectors[i], payload = new { itemId = video.Id.ToString(), libraryId, visualHash, hashVersion = IndexFingerprint.Version, frameIndex = sample.FrameIndex, timestampMs = (long)sample.FrameIndex * frameSamples[i].Interval } });
+            frames.Add(new { id = DeterministicId(video.Id, sample.FrameIndex), vector = imageVectors[i], payload = new { itemId = video.Id.ToString(), libraryId, visualHash, visualMarker, hashVersion = IndexFingerprint.Version, frameIndex = sample.FrameIndex, timestampMs = (long)sample.FrameIndex * frameSamples[i].Interval } });
         }
         _state.SetStage("saving_frames", totalBatches, totalBatches, 0);
         var coverIndexed = false;
@@ -147,6 +149,7 @@ public sealed class VideoIndexer
                                 itemId = video.Id.ToString(),
                                 libraryId,
                                 visualHash,
+                                visualMarker,
                                 hashVersion = IndexFingerprint.Version,
                                 visualSource = "primary_cover",
                                 imageTag = cover.Tag
@@ -168,11 +171,19 @@ public sealed class VideoIndexer
                 await _client.DeleteByItemAsync("jellyfin_video_covers", video.Id.ToString(), cancellationToken).ConfigureAwait(false);
             }
         }
+        if (frames.Count == 0 && !coverIndexed)
+        {
+            // Keep the title point's previous visual signature. A video with
+            // neither usable Trickplay frames nor a Primary cover is
+            // incomplete and must remain resumable on the next run.
+            _state.SetStage("video_failed", 0, 0, 0);
+            return new IndexResult(textChanged, 0, false, false, false);
+        }
         // For a visual-only change, keep the old title vector and update only
         // its payload. For a text+visual change this finalizes the payload
         // that was intentionally written with the previous visualHash above.
         await _client.SetPayloadAsync("jellyfin_video_text", video.Id.ToString(),
-            BuildTextPayload(video, libraryId, textHash, visualHash), cancellationToken).ConfigureAwait(false);
+            BuildTextPayload(video, libraryId, textHash, visualHash, visualMarker), cancellationToken).ConfigureAwait(false);
         _state.SetStage("video_completed", 0, 0, 0);
         return new IndexResult(textChanged, frames.Count, coverIndexed, false, true);
     }
@@ -186,13 +197,25 @@ public sealed class VideoIndexer
             && existing?.VisualHash == IndexFingerprint.ComputeVisualHash(video, configuration, manifest);
     }
 
-    private static object BuildTextPayload(Video video, string libraryId, string textHash, string? visualHash)
+    public async Task<IndexedContentSignature> ComputeContentSignatureAsync(Video video, CancellationToken cancellationToken)
+    {
+        var configuration = Plugin.Instance?.Configuration ?? new PluginConfiguration();
+        var manifest = await _trickplay.GetTrickplayManifest(video).ConfigureAwait(false);
+        return new IndexedContentSignature(
+            IndexFingerprint.ComputeTextHash(video, configuration),
+            IndexFingerprint.ComputeVisualHash(video, configuration, manifest),
+            IndexFingerprint.ComputeVisualMarker(video, configuration),
+            IndexFingerprint.Version);
+    }
+
+    private static object BuildTextPayload(Video video, string libraryId, string textHash, string? visualHash, string? visualMarker)
         => new
         {
             itemId = video.Id.ToString(),
             libraryId,
             textHash,
             visualHash,
+            visualMarker,
             hashVersion = IndexFingerprint.Version
         };
 
@@ -491,7 +514,7 @@ internal sealed record FrameReadResult(IReadOnlyList<FrameSample> Samples, IRead
 internal sealed record PrimaryCoverRead(byte[] Bytes, string Tag);
 
 public sealed record EmbeddingProbeResult(string ItemId, string Title, bool TextAccepted, int FramesTested, string? Error);
-public sealed record IndexResult(bool Text, int Frames, bool Cover, bool Skipped, bool Success);
+public sealed record IndexResult(bool Text, int Frames, bool Cover, bool Skipped, bool Success, bool RetryExhausted = false);
 public sealed record DetailedProbeResult(string ItemId, string Title, string TitleInput, VectorSummary TitleVector, IReadOnlyDictionary<string, double> TitleQueryScores, IReadOnlyList<ProbeFrame> Frames, IReadOnlyList<string> Queries);
 public sealed record ProbePreviewResult(string ItemId, string Title, string TitleInput, IReadOnlyList<ProbePreviewFrame> Frames, string? Reason);
 public sealed record ProbePreviewFrame(int FrameIndex, long TimestampMs, string ImageDataUrl);

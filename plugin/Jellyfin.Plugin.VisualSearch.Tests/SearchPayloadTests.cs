@@ -107,6 +107,39 @@ public sealed class SearchPayloadTests
     }
 
     [Fact]
+    public async Task IndexedSignatureScrollReadsDurableResumeRecords()
+    {
+        const string response = """
+        {
+          "result": {
+            "points": [{
+              "id": "point-1",
+              "payload": {
+                "itemId": "11111111-1111-1111-1111-111111111111",
+                "textHash": "text-v2",
+                "visualHash": "visual-v2",
+                "visualMarker": "marker-v2",
+                "hashVersion": 2
+              }
+            }],
+            "next_page_offset": null
+          }
+        }
+        """;
+        using var http = new HttpClient(new StubHandler(response));
+        var configuration = new PluginConfiguration { QdrantUrl = "http://qdrant.test" };
+        var client = new VisualSearchClient(http, () => configuration);
+
+        var signatures = await client.GetIndexedSignaturesAsync(CancellationToken.None);
+
+        var signature = Assert.Single(signatures).Value;
+        Assert.Equal("text-v2", signature.TextHash);
+        Assert.Equal("visual-v2", signature.VisualHash);
+        Assert.Equal("marker-v2", signature.VisualMarker);
+        Assert.Equal(2, signature.HashVersion);
+    }
+
+    [Fact]
     public void GroupedSearchPayloadIsParsedIntoVideoGroups()
     {
         using var document = JsonDocument.Parse("""

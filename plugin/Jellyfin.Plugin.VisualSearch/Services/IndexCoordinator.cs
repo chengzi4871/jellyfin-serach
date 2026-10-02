@@ -14,6 +14,7 @@ public sealed class IndexCoordinator
 {
     private readonly ILibraryManager _library;
     private readonly VideoIndexer _indexer;
+    private readonly VisualSearchClient _client;
     private readonly VisualSearchState _state;
     private readonly object _gate = new();
     private CancellationTokenSource? _run;
@@ -21,10 +22,11 @@ public sealed class IndexCoordinator
     private bool _pendingManual;
     private bool _pendingRebuild;
 
-    public IndexCoordinator(ILibraryManager library, VideoIndexer indexer, VisualSearchState state)
+    public IndexCoordinator(ILibraryManager library, VideoIndexer indexer, VisualSearchClient client, VisualSearchState state)
     {
         _library = library;
         _indexer = indexer;
+        _client = client;
         _state = state;
     }
 
@@ -120,6 +122,14 @@ public sealed class IndexCoordinator
             var configurationHash = IndexFingerprint.ComputeConfigurationHash(configuration);
             var configurationChanged = !string.Equals(configuration.IncrementalIndexConfigurationHash, configurationHash, StringComparison.Ordinal);
 
+            // The watermark describes the scan snapshot, while Qdrant title
+            // payloads describe per-video completion. Read those durable
+            // signatures before selecting the queue so a cancelled baseline
+            // resumes with only the videos that are still incomplete.
+            var persistedSignatures = rebuild
+                ? new Dictionary<string, IndexedContentSignature>(StringComparer.OrdinalIgnoreCase)
+                : await _client.GetIndexedSignaturesAsync(cancellationToken).ConfigureAwait(false);
+
             var allVideos = _library.GetItemList(new InternalItemsQuery
             {
                 MediaTypes = new[] { MediaType.Video },
@@ -130,46 +140,69 @@ public sealed class IndexCoordinator
 
             var videos = new List<Video>();
             var anomalousDateModifiedVideos = 0L;
-            var forceFullIndex = rebuild || !watermark.HasValue;
+            var forceFullIndex = rebuild;
             string selectionReason;
             if (rebuild)
             {
                 videos.AddRange(allVideos);
                 selectionReason = "完整重建：选中全部视频";
             }
-            else if (!watermark.HasValue)
-            {
-                videos.AddRange(allVideos);
-                selectionReason = storedWatermark.HasValue
-                    ? "增量：持久化水位线无效，执行一次安全基线扫描"
-                    : "增量：尚无成功扫描水位线，执行首次基线扫描";
-            }
-            else if (configurationChanged)
-            {
-                videos.AddRange(allVideos);
-                selectionReason = "增量：索引参数或 Embedding 配置已变化，复核全部视频的内容指纹";
-            }
             else
             {
                 foreach (var video in allVideos)
                 {
-                    var modifiedUtc = IndexFingerprint.NormalizeUtc(video.DateModified);
-                    if (IndexFingerprint.IsPlausibleDateModified(modifiedUtc, snapshotUpperBoundUtc))
+                    var itemId = video.Id.ToString();
+                    if (!persistedSignatures.TryGetValue(itemId, out var persisted)
+                        || persisted.HashVersion != IndexFingerprint.Version
+                        || string.IsNullOrWhiteSpace(persisted.TextHash)
+                        || string.IsNullOrWhiteSpace(persisted.VisualHash))
                     {
-                        if (modifiedUtc > watermark.Value && modifiedUtc <= snapshotUpperBoundUtc)
-                            videos.Add(video);
+                        videos.Add(video);
                         continue;
                     }
 
-                    // A broken future/invalid DateModified must not make a
-                    // video appear changed forever. Compare its persisted
-                    // content signature instead; this also admits a new item
-                    // whose clock value is already corrupt.
-                    anomalousDateModifiedVideos++;
-                    if (!await _indexer.IsContentCurrentAsync(video, cancellationToken).ConfigureAwait(false))
+                    var modifiedUtc = IndexFingerprint.NormalizeUtc(video.DateModified);
+                    var plausibleDate = IndexFingerprint.IsPlausibleDateModified(modifiedUtc, snapshotUpperBoundUtc);
+                    if (!plausibleDate) anomalousDateModifiedVideos++;
+                    var dateChanged = watermark.HasValue
+                        && plausibleDate
+                        && modifiedUtc > watermark.Value
+                        && modifiedUtc <= snapshotUpperBoundUtc;
+
+                    // Compare the full persisted signature for completed
+                    // videos. This catches Trickplay metadata changes even
+                    // when Jellyfin's DateModified did not move. The same
+                    // check makes a configuration change a precise queue
+                    // rebuild instead of blindly re-embedding the whole
+                    // library.
+                    IndexedContentSignature current;
+                    try
+                    {
+                        current = await _indexer.ComputeContentSignatureAsync(video, cancellationToken).ConfigureAwait(false);
+                    }
+                    catch (OperationCanceledException)
+                    {
+                        throw;
+                    }
+                    catch (Exception ex)
+                    {
+                        // A corrupt Trickplay tile or unreadable media item
+                        // belongs in the retryable queue; it must not abort
+                        // the selection pass or discard earlier progress.
+                        _state.RecordError($"{video.Name}: signature read failed; {ex.Message}");
+                        videos.Add(video);
+                        continue;
+                    }
+                    if (dateChanged || !string.Equals(persisted.TextHash, current.TextHash, StringComparison.Ordinal)
+                        || !string.Equals(persisted.VisualHash, current.VisualHash, StringComparison.Ordinal)
+                        || !string.Equals(persisted.VisualMarker, current.VisualMarker, StringComparison.Ordinal))
                         videos.Add(video);
                 }
-                selectionReason = "增量：DateModified > 持久化水位线且不超过本轮快照；异常时间值按内容指纹复核";
+                selectionReason = configurationChanged
+                    ? "增量：按持久化 TextHash/VisualHash/Trickplay 指纹复核配置变化与未完成视频"
+                    : !watermark.HasValue
+                        ? "增量：无成功扫描水位线，按持久化内容指纹恢复首次基线中断进度"
+                        : "增量：DateModified 水位线 + 持久化内容指纹，恢复取消/失败视频";
             }
 
             _state.SetQueue(videos.Count, selectionReason, snapshotUpperBoundUtc, watermark, anomalousDateModifiedVideos);
@@ -187,6 +220,14 @@ public sealed class IndexCoordinator
                 var result = await IndexWithRetryAsync(video, libraryId, cancellationToken, forceFullIndex).ConfigureAwait(false);
                 runSucceeded &= result.Success;
                 _state.RecordVideoCompleted(result);
+                if (result.RetryExhausted)
+                {
+                    // Do not hammer an unavailable cloud service for every
+                    // remaining video. Completed title/visual signatures are
+                    // already durable checkpoints; leave the rest pending
+                    // and let the next run resume after the service recovers.
+                    break;
+                }
             }
 
             if (runSucceeded)
@@ -236,6 +277,7 @@ public sealed class IndexCoordinator
     private async Task<IndexResult> IndexWithRetryAsync(Video video, string libraryId, CancellationToken cancellationToken, bool forceRebuild)
     {
         var retryDelay = Math.Clamp(Plugin.Instance?.Configuration.IndexRetryDelaySeconds ?? 15, 1, 3600);
+        var maxAttempts = Math.Clamp(Plugin.Instance?.Configuration.IndexMaxRetryAttempts ?? 5, 1, 20);
         var attempt = 0;
         while (true)
         {
@@ -255,6 +297,14 @@ public sealed class IndexCoordinator
             catch (Exception ex) when (VisualSearchClient.IsRetryable(ex))
             {
                 attempt++;
+                if (attempt > maxAttempts)
+                {
+                    _state.FailedVideos++;
+                    _state.PermanentFailures++;
+                    _state.RecordError($"{video.Name}: retry limit reached ({maxAttempts}); {ex.Message}");
+                    _state.QueueFailureReasons.AddOrUpdate("index_retry_limit", 1, (_, old) => old + 1);
+                    return new IndexResult(false, 0, false, false, false, true);
+                }
                 _state.RetryCount++;
                 _state.CurrentRetryAttempt = attempt;
                 _state.QueueWaiting = 1;

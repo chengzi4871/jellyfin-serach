@@ -349,7 +349,57 @@ public sealed class VisualSearchClient
         var point = result.EnumerateArray().FirstOrDefault();
         if (point.ValueKind != JsonValueKind.Object || !point.TryGetProperty("payload", out var payload) || payload.ValueKind != JsonValueKind.Object)
             return null;
-        return new IndexedContentSignature(ReadPayloadString(payload, "textHash"), ReadPayloadString(payload, "visualHash"));
+        return ReadIndexedSignature(payload);
+    }
+
+    /// <summary>
+    /// Reads all persisted title-point signatures in one Qdrant scroll. This
+    /// is the durable resume queue: a cancelled run must not put already
+    /// completed videos back into the next run merely because its watermark
+    /// was intentionally left unchanged.
+    /// </summary>
+    public async Task<IReadOnlyDictionary<string, IndexedContentSignature>> GetIndexedSignaturesAsync(CancellationToken cancellationToken)
+    {
+        var signatures = new Dictionary<string, IndexedContentSignature>(StringComparer.OrdinalIgnoreCase);
+        JsonElement? offset = null;
+        while (true)
+        {
+            var config = _configurationProvider();
+            var body = new Dictionary<string, object?>
+            {
+                ["limit"] = 256,
+                ["with_payload"] = true,
+                ["with_vector"] = false
+            };
+            if (offset.HasValue) body["offset"] = offset.Value;
+            using var response = await _http.PostAsJsonAsync(
+                GetQdrantUrl(config) + "/collections/jellyfin_video_text/points/scroll",
+                body,
+                cancellationToken).ConfigureAwait(false);
+            if (response.StatusCode == HttpStatusCode.NotFound) return signatures;
+            await EnsureSuccessWithDetailsAsync(response, "Qdrant scroll index signatures").ConfigureAwait(false);
+            using var document = JsonDocument.Parse(await response.Content.ReadAsStreamAsync(cancellationToken).ConfigureAwait(false));
+            if (!document.RootElement.TryGetProperty("result", out var scrollResult)
+                || scrollResult.ValueKind != JsonValueKind.Object)
+                break;
+
+            if (scrollResult.TryGetProperty("points", out var points) && points.ValueKind == JsonValueKind.Array)
+            {
+                foreach (var point in points.EnumerateArray())
+                {
+                    if (!point.TryGetProperty("payload", out var payload) || payload.ValueKind != JsonValueKind.Object) continue;
+                    var signature = ReadIndexedSignature(payload);
+                    var itemId = ReadPayloadString(payload, "itemId") ?? ReadPointId(point);
+                    if (!string.IsNullOrWhiteSpace(itemId)) signatures[itemId] = signature;
+                }
+            }
+
+            if (!scrollResult.TryGetProperty("next_page_offset", out var next)
+                || next.ValueKind is JsonValueKind.Null or JsonValueKind.Undefined)
+                break;
+            offset = next.Clone();
+        }
+        return signatures;
     }
 
     /// <summary>Updates payload metadata without re-embedding an unchanged vector.</summary>
@@ -376,6 +426,26 @@ public sealed class VisualSearchClient
             JsonValueKind.False => "false",
             _ => null
         };
+    }
+
+    private static IndexedContentSignature ReadIndexedSignature(JsonElement payload)
+        => new(
+            ReadPayloadString(payload, "textHash"),
+            ReadPayloadString(payload, "visualHash"),
+            ReadPayloadString(payload, "visualMarker"),
+            ReadPayloadInt(payload, "hashVersion"));
+
+    private static string? ReadPointId(JsonElement point)
+    {
+        if (!point.TryGetProperty("id", out var id)) return null;
+        return id.ValueKind == JsonValueKind.String ? id.GetString() : id.ToString();
+    }
+
+    private static int? ReadPayloadInt(JsonElement payload, string propertyName)
+    {
+        if (!payload.TryGetProperty(propertyName, out var value)) return null;
+        if (value.ValueKind == JsonValueKind.Number && value.TryGetInt32(out var number)) return number;
+        return int.TryParse(ReadPayloadString(payload, propertyName), out var parsed) ? parsed : null;
     }
 
     /// <summary>Removes all points belonging to one Jellyfin item from a collection.</summary>
@@ -834,7 +904,7 @@ public sealed record WorkerHealth
     public int Dimension { get; init; }
     public string Device { get; init; } = "cloud";
 }
-public sealed record IndexedContentSignature(string? TextHash, string? VisualHash);
+public sealed record IndexedContentSignature(string? TextHash, string? VisualHash, string? VisualMarker = null, int? HashVersion = null);
 public sealed record RemoteSearchHit(string ItemId, double Score, JsonElement Payload);
 public sealed record RemoteSearchGroup(string ItemId, IReadOnlyList<RemoteSearchHit> Hits);
 internal sealed class QueryCacheEntry

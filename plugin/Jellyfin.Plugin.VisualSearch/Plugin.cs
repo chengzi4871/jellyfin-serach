@@ -84,6 +84,8 @@ public sealed class PluginConfiguration : BasePluginConfiguration
     /// <summary>One line per weekday, e.g. 周一 02:00-06:00;22:00-23:30.</summary>
     public string ScheduledIndexWindows { get; set; } = string.Empty;
     public int IndexRetryDelaySeconds { get; set; } = 15;
+    /// <summary>Maximum retries for a transient Embedding/Qdrant failure before this video is recorded as failed and the queue continues.</summary>
+    public int IndexMaxRetryAttempts { get; set; } = 5;
     /// <summary>
     /// Upper bound of the last fully successful incremental/rebuild snapshot.
     /// It is persisted with the plugin configuration so a restart is safe.

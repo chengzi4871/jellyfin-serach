@@ -30,6 +30,42 @@ public static class IndexFingerprint
             configuration.FrameDeduplicationEnabled, configuration.SceneChangeSamplingEnabled,
             configuration.CoverFallbackEnabled));
 
+    /// <summary>
+    /// A cheap resume marker used while building the next queue. It excludes
+    /// Trickplay metadata because that is read separately when a candidate is
+    /// actually indexed; it lets a cancelled baseline skip videos whose
+    /// complete signature was already persisted without embedding the whole
+    /// library again.
+    /// </summary>
+    public static string ComputeVisualMarker(Video video, PluginConfiguration configuration, DateTime? referenceUtc = null)
+    {
+        var now = referenceUtc ?? DateTime.UtcNow;
+        var builder = new StringBuilder();
+        builder.Append("visual-marker\n").Append(Version).Append('\n')
+            .Append(video.Id).Append('\n')
+            .Append(video.Path).Append('\n')
+            .Append(video.Size?.ToString() ?? string.Empty).Append('\n')
+            .Append(video.RunTimeTicks?.ToString() ?? string.Empty).Append('\n')
+            .Append(FileSignature(video.Path)).Append('\n')
+            .Append(SaneDateSignature(video.DateModified, now)).Append('\n');
+
+        var image = video.GetImageInfo(MediaBrowser.Model.Entities.ImageType.Primary, 0);
+        if (image is not null)
+        {
+            builder.Append("primary\n").Append(image.Path).Append('\n')
+                .Append(FileSignature(image.Path)).Append('\n')
+                .Append(SaneDateSignature(image.DateModified, now)).Append('\n');
+        }
+
+        builder.Append(configuration.GetEffectiveMaxFramesPerVideo()).Append('|')
+            .Append(configuration.GetEffectiveSceneProbeFrames()).Append('|')
+            .Append(configuration.FrameDeduplicationEnabled).Append('|')
+            .Append(configuration.SceneChangeSamplingEnabled).Append('|')
+            .Append(configuration.CoverFallbackEnabled).Append('|')
+            .Append(ProviderIdentity(configuration));
+        return Hash(builder.ToString());
+    }
+
     public static string ComputeVisualHash(
         Video video,
         PluginConfiguration configuration,
