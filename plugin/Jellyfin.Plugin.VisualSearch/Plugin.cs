@@ -84,6 +84,12 @@ public sealed class PluginConfiguration : BasePluginConfiguration
     /// <summary>One line per weekday, e.g. 周一 02:00-06:00;22:00-23:30.</summary>
     public string ScheduledIndexWindows { get; set; } = string.Empty;
     public int IndexRetryDelaySeconds { get; set; } = 15;
+    /// <summary>
+    /// Upper bound of the last fully successful incremental/rebuild snapshot.
+    /// It is persisted with the plugin configuration so a restart is safe.
+    /// </summary>
+    public DateTime? IncrementalIndexWatermarkUtc { get; set; }
+    public string? IncrementalIndexConfigurationHash { get; set; }
 
     public int GetEffectiveMaxFramesPerVideo() => Math.Clamp(MaxFramesPerVideo > 0 ? MaxFramesPerVideo : FramesPerVideo, 1, 100);
     public int GetEffectiveSceneProbeFrames() => Math.Clamp(SceneProbeFrames > 0 ? SceneProbeFrames : 72, GetEffectiveMaxFramesPerVideo(), 200);

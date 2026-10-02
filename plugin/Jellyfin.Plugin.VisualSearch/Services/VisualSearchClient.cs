@@ -328,6 +328,56 @@ public sealed class VisualSearchClient
         await EnsureSuccessWithDetailsAsync(response, $"Qdrant upsert ({collection})").ConfigureAwait(false);
     }
 
+    /// <summary>
+    /// Reads the persisted content signatures for one video's title point.
+    /// Missing collections or points are treated as an unindexed video.
+    /// </summary>
+    public async Task<IndexedContentSignature?> GetIndexedSignatureAsync(string itemId, CancellationToken cancellationToken)
+    {
+        if (string.IsNullOrWhiteSpace(itemId)) return null;
+        var config = _configurationProvider();
+        var body = new { ids = new[] { itemId }, with_payload = true, with_vector = false };
+        using var response = await _http.PostAsJsonAsync(
+            GetQdrantUrl(config) + "/collections/jellyfin_video_text/points",
+            body,
+            cancellationToken).ConfigureAwait(false);
+        if (response.StatusCode == HttpStatusCode.NotFound) return null;
+        await EnsureSuccessWithDetailsAsync(response, "Qdrant read index signature").ConfigureAwait(false);
+        using var document = JsonDocument.Parse(await response.Content.ReadAsStreamAsync(cancellationToken).ConfigureAwait(false));
+        if (!document.RootElement.TryGetProperty("result", out var result) || result.ValueKind != JsonValueKind.Array)
+            return null;
+        var point = result.EnumerateArray().FirstOrDefault();
+        if (point.ValueKind != JsonValueKind.Object || !point.TryGetProperty("payload", out var payload) || payload.ValueKind != JsonValueKind.Object)
+            return null;
+        return new IndexedContentSignature(ReadPayloadString(payload, "textHash"), ReadPayloadString(payload, "visualHash"));
+    }
+
+    /// <summary>Updates payload metadata without re-embedding an unchanged vector.</summary>
+    public async Task SetPayloadAsync(string collection, string itemId, object payload, CancellationToken cancellationToken)
+    {
+        if (string.IsNullOrWhiteSpace(itemId)) return;
+        var config = _configurationProvider();
+        using var response = await _http.PostAsJsonAsync(
+            GetQdrantUrl(config) + "/collections/" + Uri.EscapeDataString(collection) + "/points/payload?wait=true",
+            new { payload, points = new[] { itemId } },
+            cancellationToken).ConfigureAwait(false);
+        if (response.StatusCode == HttpStatusCode.NotFound) return;
+        await EnsureSuccessWithDetailsAsync(response, $"Qdrant payload update ({collection})").ConfigureAwait(false);
+    }
+
+    private static string? ReadPayloadString(JsonElement payload, string propertyName)
+    {
+        if (!payload.TryGetProperty(propertyName, out var value)) return null;
+        return value.ValueKind switch
+        {
+            JsonValueKind.String => value.GetString(),
+            JsonValueKind.Number => value.ToString(),
+            JsonValueKind.True => "true",
+            JsonValueKind.False => "false",
+            _ => null
+        };
+    }
+
     /// <summary>Removes all points belonging to one Jellyfin item from a collection.</summary>
     public async Task DeleteByItemAsync(string collection, string itemId, CancellationToken cancellationToken)
     {
@@ -784,6 +834,7 @@ public sealed record WorkerHealth
     public int Dimension { get; init; }
     public string Device { get; init; } = "cloud";
 }
+public sealed record IndexedContentSignature(string? TextHash, string? VisualHash);
 public sealed record RemoteSearchHit(string ItemId, double Score, JsonElement Payload);
 public sealed record RemoteSearchGroup(string ItemId, IReadOnlyList<RemoteSearchHit> Hits);
 internal sealed class QueryCacheEntry

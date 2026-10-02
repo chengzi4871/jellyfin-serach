@@ -85,6 +85,28 @@ public sealed class SearchPayloadTests
     }
 
     [Fact]
+    public async Task IndexedSignatureReadsStableHashesFromQdrantPayload()
+    {
+        const string response = """
+        {
+          "result": [{
+            "id": "11111111-1111-1111-1111-111111111111",
+            "payload": {"itemId":"11111111-1111-1111-1111-111111111111","textHash":"text-v2","visualHash":"visual-v2","hashVersion":2}
+          }]
+        }
+        """;
+        using var http = new HttpClient(new StubHandler(response));
+        var configuration = new PluginConfiguration { QdrantUrl = "http://qdrant.test" };
+        var client = new VisualSearchClient(http, () => configuration);
+
+        var signature = await client.GetIndexedSignatureAsync("11111111-1111-1111-1111-111111111111", CancellationToken.None);
+
+        Assert.NotNull(signature);
+        Assert.Equal("text-v2", signature!.TextHash);
+        Assert.Equal("visual-v2", signature.VisualHash);
+    }
+
+    [Fact]
     public void GroupedSearchPayloadIsParsedIntoVideoGroups()
     {
         using var document = JsonDocument.Parse("""

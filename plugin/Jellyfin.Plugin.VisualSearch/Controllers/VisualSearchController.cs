@@ -311,9 +311,10 @@ public sealed class VisualSearchController : ControllerBase
         try
         {
             var indexed = await _indexer.IndexAsync(video, libraryId, cancellationToken).ConfigureAwait(false);
-            _state.IndexedVideos++;
+            if (indexed.Success && !indexed.Skipped) _state.IndexedVideos++;
+            if (indexed.Skipped) _state.SkippedVideos++;
             _state.Status = "ready";
-            return Ok(new { itemId = video.Id, textIndexed = indexed.Text, framesIndexed = indexed.Frames, coverIndexed = indexed.Cover });
+            return Ok(new { itemId = video.Id, textIndexed = indexed.Text, framesIndexed = indexed.Frames, coverIndexed = indexed.Cover, skipped = indexed.Skipped, success = indexed.Success });
         }
         catch (TaskCanceledException ex) { return StatusCode(504, new { status = "timeout", stage = "index", message = ex.Message }); }
         catch (VisualSearchConfigurationException ex) { return BadRequest(new { status = "error", stage = "configuration", message = ex.Message }); }

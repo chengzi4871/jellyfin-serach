@@ -77,6 +77,14 @@ public sealed class VisualSearchState
     public long QueueCompleted { get; set; }
     public long QueueWaiting { get; set; }
     public long PermanentFailures { get; set; }
+    public long SkippedVideos { get; set; }
+    public long SelectedVideos { get; set; }
+    public long AnomalousDateModifiedVideos { get; set; }
+    public DateTime? SnapshotUpperBoundUtc { get; set; }
+    public DateTime? WatermarkBeforeUtc { get; set; }
+    public DateTime? WatermarkAfterUtc { get; set; }
+    public bool WatermarkPersisted { get; set; }
+    public string SelectionReason { get; set; } = string.Empty;
     public string? CurrentItemId { get; set; }
     public string? LastError { get; set; }
     public DateTime? LastErrorAt { get; set; }
@@ -122,6 +130,14 @@ public sealed class VisualSearchState
         QueueCompleted = 0;
         QueueWaiting = 0;
         PermanentFailures = 0;
+        SkippedVideos = 0;
+        SelectedVideos = 0;
+        AnomalousDateModifiedVideos = 0;
+        SnapshotUpperBoundUtc = null;
+        WatermarkBeforeUtc = null;
+        WatermarkAfterUtc = null;
+        WatermarkPersisted = false;
+        SelectionReason = string.Empty;
         CurrentItemId = null;
         LastError = null;
         LastErrorAt = null;
@@ -131,7 +147,10 @@ public sealed class VisualSearchState
 
     public void BeginRun(string runType, bool rebuild)
     {
-        if (rebuild) ResetIndexCounters();
+        // Counters describe the current run. Reset them for incremental runs
+        // too; otherwise a previous rebuild's failures and totals leak into
+        // the next run and make the UI and watermark decision misleading.
+        ResetIndexCounters();
         RunType = runType;
         Status = "loading_library";
         Stage = "loading_library";
@@ -161,10 +180,23 @@ public sealed class VisualSearchState
         EstimatedRemainingSeconds = 0;
     }
 
-    public void SetQueue(long total)
+    public void SetQueue(long total, string selectionReason, DateTime snapshotUpperBoundUtc, DateTime? watermarkBeforeUtc, long anomalousDateModifiedVideos)
     {
         QueueTotal = total;
         PendingVideos = total;
+        SelectedVideos = total;
+        SelectionReason = selectionReason;
+        SnapshotUpperBoundUtc = snapshotUpperBoundUtc;
+        WatermarkBeforeUtc = watermarkBeforeUtc;
+        AnomalousDateModifiedVideos = anomalousDateModifiedVideos;
+        WatermarkPersisted = false;
+        LastProgressAt = DateTime.UtcNow;
+    }
+
+    public void SetWatermarkPersisted(DateTime watermarkUtc)
+    {
+        WatermarkAfterUtc = watermarkUtc;
+        WatermarkPersisted = true;
         LastProgressAt = DateTime.UtcNow;
     }
 
@@ -224,9 +256,10 @@ public sealed class VisualSearchState
         UpdateRate();
     }
 
-    public void RecordVideoCompleted(bool indexed)
+    public void RecordVideoCompleted(IndexResult result)
     {
-        if (indexed) IndexedVideos++;
+        if (result.Skipped) SkippedVideos++;
+        else if (result.Success) IndexedVideos++;
         QueueCompleted++;
         PendingVideos = Math.Max(0, PendingVideos - 1);
         Stage = "video_completed";

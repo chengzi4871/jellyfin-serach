@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Generic;
 using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
@@ -19,7 +20,6 @@ public sealed class IndexCoordinator
     private bool _scheduledRun;
     private bool _pendingManual;
     private bool _pendingRebuild;
-    private DateTime? _lastScheduledScanUtc;
 
     public IndexCoordinator(ILibraryManager library, VideoIndexer indexer, VisualSearchState state)
     {
@@ -73,7 +73,7 @@ public sealed class IndexCoordinator
         _scheduledRun = scheduled;
         _run = new CancellationTokenSource();
         var token = _run.Token;
-        _ = Task.Run(() => RunAsync(token, scheduled));
+        _ = Task.Run(() => RunAsync(token, scheduled, rebuild));
     }
 
     public void Cancel()
@@ -104,13 +104,23 @@ public sealed class IndexCoordinator
         if (_run is not null) _state.Status = _scheduledRun ? "processing_scheduled" : "processing";
     }
 
-    private async Task RunAsync(CancellationToken cancellationToken, bool scheduled)
+    private async Task RunAsync(CancellationToken cancellationToken, bool scheduled, bool rebuild)
     {
         try
         {
             _state.Status = scheduled ? "processing_scheduled" : "processing";
-            var scheduledSince = scheduled ? _lastScheduledScanUtc : null;
-            var videos = _library.GetItemList(new InternalItemsQuery
+            // Capture the upper bound before querying Jellyfin. Anything that
+            // changes after this instant is deliberately left for the next
+            // run, so a multi-hour indexing pass cannot lose new files.
+            var snapshotUpperBoundUtc = DateTime.UtcNow;
+            var configuration = Plugin.Instance?.Configuration ?? new PluginConfiguration();
+            var storedWatermark = configuration.IncrementalIndexWatermarkUtc;
+            var watermark = storedWatermark.HasValue ? IndexFingerprint.NormalizeUtc(storedWatermark.Value) : (DateTime?)null;
+            if (watermark.HasValue && watermark.Value > snapshotUpperBoundUtc.AddDays(1)) watermark = null;
+            var configurationHash = IndexFingerprint.ComputeConfigurationHash(configuration);
+            var configurationChanged = !string.Equals(configuration.IncrementalIndexConfigurationHash, configurationHash, StringComparison.Ordinal);
+
+            var allVideos = _library.GetItemList(new InternalItemsQuery
             {
                 MediaTypes = new[] { MediaType.Video },
                 IsVirtualItem = false,
@@ -118,12 +128,52 @@ public sealed class IndexCoordinator
                 Recursive = true
             }).OfType<Video>().ToList();
 
-            // The first scheduled scan covers the current library. Later scheduled scans
-            // only pick up items changed since the last completed scheduled scan.
-            if (scheduledSince.HasValue)
-                videos = videos.Where(x => x.DateModified > scheduledSince.Value).ToList();
+            var videos = new List<Video>();
+            var anomalousDateModifiedVideos = 0L;
+            var forceFullIndex = rebuild || !watermark.HasValue;
+            string selectionReason;
+            if (rebuild)
+            {
+                videos.AddRange(allVideos);
+                selectionReason = "完整重建：选中全部视频";
+            }
+            else if (!watermark.HasValue)
+            {
+                videos.AddRange(allVideos);
+                selectionReason = storedWatermark.HasValue
+                    ? "增量：持久化水位线无效，执行一次安全基线扫描"
+                    : "增量：尚无成功扫描水位线，执行首次基线扫描";
+            }
+            else if (configurationChanged)
+            {
+                videos.AddRange(allVideos);
+                selectionReason = "增量：索引参数或 Embedding 配置已变化，复核全部视频的内容指纹";
+            }
+            else
+            {
+                foreach (var video in allVideos)
+                {
+                    var modifiedUtc = IndexFingerprint.NormalizeUtc(video.DateModified);
+                    if (IndexFingerprint.IsPlausibleDateModified(modifiedUtc, snapshotUpperBoundUtc))
+                    {
+                        if (modifiedUtc > watermark.Value && modifiedUtc <= snapshotUpperBoundUtc)
+                            videos.Add(video);
+                        continue;
+                    }
 
-            _state.SetQueue(videos.Count);
+                    // A broken future/invalid DateModified must not make a
+                    // video appear changed forever. Compare its persisted
+                    // content signature instead; this also admits a new item
+                    // whose clock value is already corrupt.
+                    anomalousDateModifiedVideos++;
+                    if (!await _indexer.IsContentCurrentAsync(video, cancellationToken).ConfigureAwait(false))
+                        videos.Add(video);
+                }
+                selectionReason = "增量：DateModified > 持久化水位线且不超过本轮快照；异常时间值按内容指纹复核";
+            }
+
+            _state.SetQueue(videos.Count, selectionReason, snapshotUpperBoundUtc, watermark, anomalousDateModifiedVideos);
+            var runSucceeded = true;
 
             for (var index = 0; index < videos.Count; index++)
             {
@@ -134,13 +184,25 @@ public sealed class IndexCoordinator
                 _state.SetVideo(index + 1, videos.Count, video.Id.ToString(), video.Name);
 
                 var libraryId = _library.GetCollectionFolders(video).FirstOrDefault()?.Id.ToString() ?? string.Empty;
-                var indexed = await IndexWithRetryAsync(video, libraryId, cancellationToken).ConfigureAwait(false);
-                _state.RecordVideoCompleted(indexed);
+                var result = await IndexWithRetryAsync(video, libraryId, cancellationToken, forceFullIndex).ConfigureAwait(false);
+                runSucceeded &= result.Success;
+                _state.RecordVideoCompleted(result);
             }
 
-            if (scheduled) _lastScheduledScanUtc = DateTime.UtcNow;
-            _state.Stage = "completed";
-            _state.Status = "ready";
+            if (runSucceeded)
+            {
+                cancellationToken.ThrowIfCancellationRequested();
+                PersistWatermark(snapshotUpperBoundUtc);
+                _state.Stage = "completed";
+                _state.Status = "ready";
+            }
+            else
+            {
+                // Keep the old watermark. The next incremental run is
+                // intentionally re-entrant and retries failed videos.
+                _state.Stage = "completed_with_errors";
+                _state.Status = "completed_with_errors";
+            }
         }
         catch (OperationCanceledException)
         {
@@ -171,7 +233,7 @@ public sealed class IndexCoordinator
         }
     }
 
-    private async Task<bool> IndexWithRetryAsync(Video video, string libraryId, CancellationToken cancellationToken)
+    private async Task<IndexResult> IndexWithRetryAsync(Video video, string libraryId, CancellationToken cancellationToken, bool forceRebuild)
     {
         var retryDelay = Math.Clamp(Plugin.Instance?.Configuration.IndexRetryDelaySeconds ?? 15, 1, 3600);
         var attempt = 0;
@@ -179,12 +241,16 @@ public sealed class IndexCoordinator
         {
             try
             {
-                await _indexer.IndexAsync(video, libraryId, cancellationToken).ConfigureAwait(false);
+                var result = await _indexer.IndexAsync(video, libraryId, cancellationToken, forceRebuild).ConfigureAwait(false);
                 _state.RecordError(string.Empty);
                 _state.QueueWaiting = 0;
                 _state.CurrentRetryAttempt = 0;
                 _state.NextRetryAt = null;
-                return true;
+                return result;
+            }
+            catch (OperationCanceledException)
+            {
+                throw;
             }
             catch (Exception ex) when (VisualSearchClient.IsRetryable(ex))
             {
@@ -209,9 +275,19 @@ public sealed class IndexCoordinator
                 _state.PermanentFailures++;
                 _state.RecordError($"{video.Name}: {ex.Message}");
                 _state.QueueFailureReasons.AddOrUpdate("index_permanent_error", 1, (_, old) => old + 1);
-                return false;
+                return new IndexResult(false, 0, false, false, false);
             }
         }
+    }
+
+    private void PersistWatermark(DateTime snapshotUpperBoundUtc)
+    {
+        var plugin = Plugin.Instance;
+        if (plugin is null) return;
+        plugin.Configuration.IncrementalIndexWatermarkUtc = snapshotUpperBoundUtc;
+        plugin.Configuration.IncrementalIndexConfigurationHash = IndexFingerprint.ComputeConfigurationHash(plugin.Configuration);
+        plugin.SaveConfiguration();
+        _state.SetWatermarkPersisted(snapshotUpperBoundUtc);
     }
 
     private async Task WaitForScheduleWindowAsync(CancellationToken cancellationToken)

@@ -31,24 +31,51 @@ public sealed class VideoIndexer
         _state = state;
     }
 
-    public async Task<(bool Text, int Frames, bool Cover)> IndexAsync(Video video, string libraryId, CancellationToken cancellationToken)
+    public async Task<IndexResult> IndexAsync(Video video, string libraryId, CancellationToken cancellationToken, bool forceRebuild = false)
     {
         var configuration = Plugin.Instance?.Configuration ?? new PluginConfiguration();
-        var text = BuildTitleText(video);
-        _state.SetStage("embedding_title", 0, 1, 1);
-        _state.PlanEmbeddingInputs(1);
-        var titleVector = await _client.EmbedTextAsync(text, cancellationToken).ConfigureAwait(false);
-        _state.RecordEmbeddingInputs(1);
-        _state.SetStage("saving_title", 1, 1, 1);
-        await _client.UpsertAsync("jellyfin_video_text", new[]
+        var text = IndexFingerprint.BuildTitleText(video);
+        // Read the manifest before comparing signatures. This detects a new
+        // Trickplay set even when Jellyfin's media DateModified did not change.
+        var manifest = await _trickplay.GetTrickplayManifest(video).ConfigureAwait(false);
+        var textHash = IndexFingerprint.ComputeTextHash(video, configuration);
+        var visualHash = IndexFingerprint.ComputeVisualHash(video, configuration, manifest);
+        var existing = forceRebuild ? null : await _client.GetIndexedSignatureAsync(video.Id.ToString(), cancellationToken).ConfigureAwait(false);
+        var textChanged = forceRebuild || existing?.TextHash != textHash;
+        var visualChanged = forceRebuild || existing?.VisualHash != visualHash;
+        if (!textChanged && !visualChanged)
         {
-            new { id = video.Id.ToString(), vector = titleVector, payload = new { itemId = video.Id.ToString(), libraryId, textHash = text.GetHashCode().ToString() } }
-        }, cancellationToken).ConfigureAwait(false);
+            _state.SetStage("skipped_unchanged", 0, 0, 0);
+            return new IndexResult(false, 0, false, true, true);
+        }
+
+        if (textChanged)
+        {
+            _state.SetStage("embedding_title", 0, 1, 1);
+            _state.PlanEmbeddingInputs(1);
+            var titleVector = await _client.EmbedTextAsync(text, cancellationToken).ConfigureAwait(false);
+            _state.RecordEmbeddingInputs(1);
+            _state.SetStage("saving_title", 1, 1, 1);
+            // Do not publish a new visualHash until the visual part has
+            // completed. If cancellation/error occurs, the next run retries
+            // only that visual part instead of falsely considering it done.
+            await _client.UpsertAsync("jellyfin_video_text", new[]
+            {
+                new
+                {
+                    id = video.Id.ToString(),
+                    vector = titleVector,
+                    payload = BuildTextPayload(video, libraryId, textHash, visualChanged ? existing?.VisualHash : visualHash)
+                }
+            }, cancellationToken).ConfigureAwait(false);
+        }
+
+        if (!visualChanged)
+            return new IndexResult(textChanged, 0, false, false, true);
 
         _state.SetStage("reading_frames", 0, 0, 0);
         var frameSamples = new List<(FrameSample Sample, int Interval)>();
         var frameFailureReasons = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
-        var manifest = await _trickplay.GetTrickplayManifest(video).ConfigureAwait(false);
         foreach (var mediaSource in manifest.Values)
         {
             if (mediaSource.Count == 0) continue;
@@ -72,7 +99,7 @@ public sealed class VideoIndexer
         for (var i = 0; i < frameSamples.Count; i++)
         {
             var sample = frameSamples[i].Sample;
-            frames.Add(new { id = DeterministicId(video.Id, sample.FrameIndex), vector = imageVectors[i], payload = new { itemId = video.Id.ToString(), libraryId, frameIndex = sample.FrameIndex, timestampMs = (long)sample.FrameIndex * frameSamples[i].Interval } });
+            frames.Add(new { id = DeterministicId(video.Id, sample.FrameIndex), vector = imageVectors[i], payload = new { itemId = video.Id.ToString(), libraryId, visualHash, hashVersion = IndexFingerprint.Version, frameIndex = sample.FrameIndex, timestampMs = (long)sample.FrameIndex * frameSamples[i].Interval } });
         }
         _state.SetStage("saving_frames", totalBatches, totalBatches, 0);
         var coverIndexed = false;
@@ -119,6 +146,8 @@ public sealed class VideoIndexer
                             {
                                 itemId = video.Id.ToString(),
                                 libraryId,
+                                visualHash,
+                                hashVersion = IndexFingerprint.Version,
                                 visualSource = "primary_cover",
                                 imageTag = cover.Tag
                             }
@@ -139,9 +168,33 @@ public sealed class VideoIndexer
                 await _client.DeleteByItemAsync("jellyfin_video_covers", video.Id.ToString(), cancellationToken).ConfigureAwait(false);
             }
         }
+        // For a visual-only change, keep the old title vector and update only
+        // its payload. For a text+visual change this finalizes the payload
+        // that was intentionally written with the previous visualHash above.
+        await _client.SetPayloadAsync("jellyfin_video_text", video.Id.ToString(),
+            BuildTextPayload(video, libraryId, textHash, visualHash), cancellationToken).ConfigureAwait(false);
         _state.SetStage("video_completed", 0, 0, 0);
-        return (true, frames.Count, coverIndexed);
+        return new IndexResult(textChanged, frames.Count, coverIndexed, false, true);
     }
+
+    public async Task<bool> IsContentCurrentAsync(Video video, CancellationToken cancellationToken)
+    {
+        var configuration = Plugin.Instance?.Configuration ?? new PluginConfiguration();
+        var manifest = await _trickplay.GetTrickplayManifest(video).ConfigureAwait(false);
+        var existing = await _client.GetIndexedSignatureAsync(video.Id.ToString(), cancellationToken).ConfigureAwait(false);
+        return existing?.TextHash == IndexFingerprint.ComputeTextHash(video, configuration)
+            && existing?.VisualHash == IndexFingerprint.ComputeVisualHash(video, configuration, manifest);
+    }
+
+    private static object BuildTextPayload(Video video, string libraryId, string textHash, string? visualHash)
+        => new
+        {
+            itemId = video.Id.ToString(),
+            libraryId,
+            textHash,
+            visualHash,
+            hashVersion = IndexFingerprint.Version
+        };
 
     private static async Task<PrimaryCoverRead?> ReadPrimaryCoverAsync(Video video, CancellationToken cancellationToken)
     {
@@ -162,8 +215,7 @@ public sealed class VideoIndexer
         }
     }
 
-    private static string BuildTitleText(Video video)
-        => $"Title: {video.Name}\nOriginal title: {video.OriginalTitle}\nFilename: {Path.GetFileName(video.Path)}";
+    private static string BuildTitleText(Video video) => IndexFingerprint.BuildTitleText(video);
 
     public async Task<EmbeddingProbeResult> ProbeAsync(Video video, int maxFrames, CancellationToken cancellationToken)
     {
@@ -439,6 +491,7 @@ internal sealed record FrameReadResult(IReadOnlyList<FrameSample> Samples, IRead
 internal sealed record PrimaryCoverRead(byte[] Bytes, string Tag);
 
 public sealed record EmbeddingProbeResult(string ItemId, string Title, bool TextAccepted, int FramesTested, string? Error);
+public sealed record IndexResult(bool Text, int Frames, bool Cover, bool Skipped, bool Success);
 public sealed record DetailedProbeResult(string ItemId, string Title, string TitleInput, VectorSummary TitleVector, IReadOnlyDictionary<string, double> TitleQueryScores, IReadOnlyList<ProbeFrame> Frames, IReadOnlyList<string> Queries);
 public sealed record ProbePreviewResult(string ItemId, string Title, string TitleInput, IReadOnlyList<ProbePreviewFrame> Frames, string? Reason);
 public sealed record ProbePreviewFrame(int FrameIndex, long TimestampMs, string ImageDataUrl);
