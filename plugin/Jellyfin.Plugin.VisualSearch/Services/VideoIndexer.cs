@@ -44,9 +44,18 @@ public sealed class VideoIndexer
         var existing = forceRebuild ? null : await _client.GetIndexedSignatureAsync(video.Id.ToString(), cancellationToken).ConfigureAwait(false);
         var signatureVersionChanged = existing?.HashVersion != IndexFingerprint.Version;
         var textChanged = forceRebuild || signatureVersionChanged || existing?.TextHash != textHash;
-        var visualChanged = forceRebuild || signatureVersionChanged || existing?.VisualHash != visualHash || existing?.VisualMarker != visualMarker;
+        var visualChanged = forceRebuild || signatureVersionChanged || existing?.VisualHash != visualHash
+            || (existing?.VisualMarker is not null && existing.VisualMarker != visualMarker);
         if (!textChanged && !visualChanged)
         {
+            // Version 2 records written by 0.1.0.14 have complete hashes but
+            // no visualMarker. Backfill only the metadata so their existing
+            // vectors remain reusable and are never embedded a second time.
+            if (existing?.VisualMarker is null)
+            {
+                await _client.SetPayloadAsync("jellyfin_video_text", video.Id.ToString(),
+                    BuildTextPayload(video, libraryId, textHash, visualHash, visualMarker), cancellationToken).ConfigureAwait(false);
+            }
             _state.SetStage("skipped_unchanged", 0, 0, 0);
             return new IndexResult(false, 0, false, true, true);
         }

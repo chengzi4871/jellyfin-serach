@@ -195,7 +195,8 @@ public sealed class IndexCoordinator
                     }
                     if (dateChanged || !string.Equals(persisted.TextHash, current.TextHash, StringComparison.Ordinal)
                         || !string.Equals(persisted.VisualHash, current.VisualHash, StringComparison.Ordinal)
-                        || !string.Equals(persisted.VisualMarker, current.VisualMarker, StringComparison.Ordinal))
+                        || (persisted.VisualMarker is not null
+                            && !string.Equals(persisted.VisualMarker, current.VisualMarker, StringComparison.Ordinal)))
                         videos.Add(video);
                 }
                 selectionReason = configurationChanged
