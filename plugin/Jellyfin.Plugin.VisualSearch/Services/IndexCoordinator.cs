@@ -224,10 +224,10 @@ public sealed class IndexCoordinator
 
                 if (_pendingManual)
                 {
-                    var rebuild = _pendingRebuild;
+                    var pendingRebuild = _pendingRebuild;
                     _pendingManual = false;
                     _pendingRebuild = false;
-                    StartLocked(scheduled: false, rebuild: rebuild);
+                    StartLocked(scheduled: false, rebuild: pendingRebuild);
                 }
             }
         }
