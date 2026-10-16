@@ -6,6 +6,16 @@ on:
   pull_request:
 
 jobs:
+  web:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - run: node --check plugin/Jellyfin.Plugin.VisualSearch/Web/visual-search.js
+      - run: node --test tests/web/visual-search.test.cjs
+
   python:
     runs-on: ubuntu-latest
     steps:

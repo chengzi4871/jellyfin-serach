@@ -12,7 +12,8 @@
     var playbackWatchTimer = 0;
     var suspendedPanel = null;
     var playbackRouteSeen = false;
-    var playbackSuspendStartedAt = 0;
+    var playbackIdleSince = 0;
+    var playbackStarting = false;
     var settings = { resultLimit: 30, defaultPresetId: 'balanced', presets: [], customCode: '', display: {} };
 
     function prop(object, name) {
@@ -76,81 +77,84 @@
             '#jf-visual-search-launcher{position:fixed;right:20px;bottom:22px;right:max(20px,env(safe-area-inset-right));bottom:max(22px,env(safe-area-inset-bottom));z-index:10000;display:inline-flex;align-items:center;gap:8px;min-height:48px;padding:0 17px;border:1px solid #ffffff45;border-radius:999px;background:linear-gradient(135deg,var(--theme-primary-color,#00a4dc),#12607e);color:#fff;font-size:14px;font-weight:750;letter-spacing:.01em;box-shadow:0 8px 28px #0007;cursor:pointer;transition:transform .18s ease,box-shadow .18s ease}#jf-visual-search-launcher:hover{transform:translateY(-2px);box-shadow:0 12px 32px #0009}#jf-visual-search-launcher:focus-visible{outline:3px solid #fff8;outline-offset:3px}#jf-visual-search-launcher .jf-vs-launcher-icon{font-size:21px;line-height:1}',
             '#jf-visual-search-panel{position:fixed;inset:0;z-index:10001;overflow:auto;background:radial-gradient(ellipse at 10% -10%,#0a6c9140,transparent 42%),linear-gradient(145deg,#101820f2,var(--theme-background,#202020) 45%,#0d1218f7);color:var(--theme-text-color,#fff);animation:jf-vs-in .18s ease-out}#jf-visual-search-panel .jf-vs-shell{width:min(1240px,100%);min-height:100%;box-sizing:border-box;margin:0 auto;padding:clamp(18px,3vw,40px) clamp(14px,3vw,38px) 50px}#jf-visual-search-panel .jf-vs-header{display:flex;align-items:flex-start;justify-content:space-between;gap:18px;margin-bottom:18px}#jf-visual-search-panel .jf-vs-kicker{margin:0 0 5px;color:var(--theme-primary-color,#00a4dc);font-size:11px;font-weight:850;letter-spacing:.16em;text-transform:uppercase}#jf-visual-search-panel h1{margin:0;font-size:clamp(25px,4vw,38px);line-height:1.12}#jf-visual-search-panel .jf-vs-subtitle{max-width:720px;margin:9px 0 0;color:#ffffff99;font-size:13px;line-height:1.5}#jf-visual-search-panel .jf-vs-close{width:40px;height:40px;flex:0 0 auto;border:1px solid #ffffff25;border-radius:50%;background:#ffffff0d;color:inherit;font-size:24px;line-height:1;cursor:pointer}#jf-visual-search-panel .jf-vs-close:hover{background:#ffffff1e}',
             '#jf-visual-search-panel .jf-vs-searchbar{display:flex;align-items:center;gap:9px;padding:7px 8px 7px 16px;border:1px solid #ffffff2b;border-radius:14px;background:#00000030;box-shadow:0 12px 38px #0003;transition:border-color .18s ease,box-shadow .18s ease}#jf-visual-search-panel .jf-vs-searchbar:focus-within{border-color:var(--theme-primary-color,#00a4dc);box-shadow:0 0 0 3px #00a4dc2b,0 12px 38px #0003}#jf-visual-search-panel input{min-width:0;flex:1;border:0;outline:0;background:transparent;color:inherit;font:inherit;font-size:17px}#jf-visual-search-panel input::placeholder{color:#ffffff66}#jf-visual-search-panel .jf-vs-clear{display:none;width:30px;height:30px;border:0;border-radius:50%;background:#ffffff12;color:inherit;cursor:pointer}#jf-visual-search-panel .jf-vs-clear.is-visible{display:block}#jf-visual-search-panel .jf-vs-submit,#jf-visual-search-panel .jf-vs-toolbar button.jf-vs-primary{display:inline-flex;align-items:center;justify-content:center;gap:6px;min-height:40px;padding:0 16px;border:0;border-radius:10px;background:var(--theme-primary-color,#00a4dc);color:#fff;font:inherit;font-weight:750;cursor:pointer}#jf-visual-search-panel button:disabled{opacity:.45;cursor:not-allowed}',
-            '#jf-visual-search-panel .jf-vs-options{display:flex;align-items:center;gap:9px;flex-wrap:wrap;margin:12px 0 18px;color:#ffffff9c;font-size:12px}#jf-visual-search-panel .jf-vs-options label{display:flex;align-items:center;gap:7px}#jf-visual-search-panel select{min-height:34px;max-width:240px;padding:6px 10px;border:1px solid #ffffff26;border-radius:9px;background:#18242d;color:inherit;font:inherit}#jf-visual-search-panel .jf-vs-hints{display:flex;flex-wrap:wrap;gap:7px;margin-left:auto}#jf-visual-search-panel .jf-vs-hint{padding:6px 10px;border:1px solid #ffffff1e;border-radius:999px;background:#ffffff08;color:#ffffffbd;font-size:12px;cursor:pointer}#jf-visual-search-panel .jf-vs-hint:hover{background:#ffffff15;color:#fff}',
+            '#jf-visual-search-panel .jf-vs-options{display:flex;align-items:center;gap:9px;flex-wrap:wrap;margin:12px 0 18px;color:#ffffff9c;font-size:12px}#jf-visual-search-panel .jf-vs-options label{display:flex;align-items:center;gap:7px}#jf-visual-search-panel select{min-height:34px;max-width:240px;padding:6px 10px;border:1px solid #ffffff26;border-radius:9px;background:#18242d;color:inherit;font:inherit}',
             '#jf-visual-search-panel .jf-vs-toolbar{display:flex;align-items:center;justify-content:space-between;gap:12px;flex-wrap:wrap;margin:4px 0 14px;padding:12px 14px;border:1px solid #ffffff16;border-radius:13px;background:#ffffff08}#jf-visual-search-panel .jf-vs-toolbar-left,#jf-visual-search-panel .jf-vs-toolbar-right{display:flex;align-items:center;gap:8px;flex-wrap:wrap}#jf-visual-search-panel .jf-vs-toolbar button{min-height:35px;padding:6px 11px;border:1px solid #ffffff22;border-radius:8px;background:#ffffff0d;color:inherit;font:inherit;font-size:12px;font-weight:700;cursor:pointer}#jf-visual-search-panel .jf-vs-toolbar button:hover{background:#ffffff19}#jf-visual-search-panel .jf-vs-count{color:#ffffff9c;font-size:12px}',
             '#jf-visual-search-panel .jf-vs-results{display:grid;grid-template-columns:repeat(auto-fill,minmax(174px,1fr));gap:16px}#jf-visual-search-panel .jf-vs-card{position:relative;display:flex;min-width:0;flex-direction:column;overflow:hidden;border:1px solid #ffffff14;border-radius:14px;background:linear-gradient(180deg,#ffffff0b,#ffffff05);box-shadow:0 8px 22px #0002;transition:transform .16s ease,border-color .16s ease,box-shadow .16s ease}#jf-visual-search-panel .jf-vs-card:hover{transform:translateY(-3px);border-color:#ffffff3b;box-shadow:0 14px 30px #0005}#jf-visual-search-panel .jf-vs-poster{position:relative;aspect-ratio:16/10;overflow:hidden;background:linear-gradient(135deg,#17354a,#263140);cursor:pointer}#jf-visual-search-panel .jf-vs-poster img{width:100%;height:100%;display:block;object-fit:cover}#jf-visual-search-panel .jf-vs-poster-fallback{position:absolute;inset:0;display:flex;align-items:center;justify-content:center;color:#ffffff6b;font-size:34px}#jf-visual-search-panel .jf-vs-rank{position:absolute;top:8px;left:8px;padding:3px 7px;border-radius:999px;background:#000b;color:#fff;font-size:11px;font-weight:800}#jf-visual-search-panel .jf-vs-play{position:absolute;right:8px;bottom:8px;width:35px;height:35px;border:1px solid #ffffff55;border-radius:50%;background:#0009;color:#fff;font-size:16px;cursor:pointer}#jf-visual-search-panel .jf-vs-play:hover{background:var(--theme-primary-color,#00a4dc)}#jf-visual-search-panel .jf-vs-card-body{display:flex;min-width:0;flex:1;flex-direction:column;padding:11px 11px 10px}#jf-visual-search-panel .jf-vs-card-title{display:block;overflow:hidden;color:inherit;text-decoration:none;font-size:14px;font-weight:750;line-height:1.35;text-overflow:ellipsis;white-space:nowrap}#jf-visual-search-panel .jf-vs-card-title:hover{color:var(--theme-primary-color,#00a4dc)}#jf-visual-search-panel .jf-vs-meta{margin-top:4px;color:#ffffff73;font-size:11px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}#jf-visual-search-panel .jf-vs-score{display:flex;align-items:center;gap:7px;margin-top:auto;padding-top:10px;color:#ffffffa8;font-size:11px}#jf-visual-search-panel .jf-vs-score strong{margin-left:auto;color:#fff;font-size:12px}#jf-visual-search-panel .jf-vs-bar{height:4px;margin-top:5px;overflow:hidden;border-radius:99px;background:#ffffff14}#jf-visual-search-panel .jf-vs-bar span{display:block;height:100%;border-radius:inherit;background:linear-gradient(90deg,var(--theme-primary-color,#00a4dc),#7bdcff)}#jf-visual-search-panel .jf-vs-chips{display:flex;flex-wrap:wrap;gap:5px;margin-top:8px}#jf-visual-search-panel .jf-vs-chip{max-width:100%;padding:3px 6px;overflow:hidden;border-radius:5px;background:#ffffff10;color:#ffffff9e;font-size:10px;text-overflow:ellipsis;white-space:nowrap}#jf-visual-search-panel .jf-vs-card-actions{display:flex;gap:6px;margin-top:9px}#jf-visual-search-panel .jf-vs-card-actions button{min-width:0;flex:1;padding:6px 5px;border:1px solid #ffffff1a;border-radius:7px;background:#ffffff08;color:#ffffffbe;font-size:11px;cursor:pointer}#jf-visual-search-panel .jf-vs-card-actions button:hover{background:#ffffff18;color:#fff}',
             '#jf-visual-search-panel .jf-vs-status{min-height:22px;color:#ffffff9e;font-size:13px}#jf-visual-search-panel .jf-vs-status.is-error{color:#ffaaaa}#jf-visual-search-panel .jf-vs-spinner{display:inline-block;width:13px;height:13px;margin-right:7px;border:2px solid #ffffff3d;border-top-color:currentColor;border-radius:50%;vertical-align:-2px;animation:jf-vs-spin .8s linear infinite}#jf-visual-search-panel .jf-vs-empty{grid-column:1/-1;padding:72px 12px;text-align:center;color:#ffffff9c}#jf-visual-search-panel .jf-vs-empty-icon{margin-bottom:12px;color:var(--theme-primary-color,#00a4dc);font-size:40px}#jf-visual-search-panel .jf-vs-empty strong{display:block;margin-bottom:7px;color:#fff;font-size:16px}#jf-visual-search-panel .jf-vs-empty span{font-size:13px}#jf-visual-search-panel .jf-vs-footer{margin-top:26px;color:#ffffff54;font-size:11px;text-align:center}',
-            '@keyframes jf-vs-in{from{opacity:0;transform:translateY(8px)}to{opacity:1;transform:none}}@keyframes jf-vs-spin{to{transform:rotate(360deg)}}@media(max-width:600px){#jf-visual-search-launcher{right:14px;bottom:14px;right:max(14px,env(safe-area-inset-right));bottom:max(14px,env(safe-area-inset-bottom));width:48px;height:48px;min-height:48px;padding:0;justify-content:center;border-radius:50%}#jf-visual-search-launcher .jf-vs-launcher-label{display:none}#jf-visual-search-panel .jf-vs-shell{padding:16px 12px calc(32px + env(safe-area-inset-bottom))}#jf-visual-search-panel .jf-vs-header{margin-bottom:14px}#jf-visual-search-panel .jf-vs-subtitle{font-size:12px}#jf-visual-search-panel .jf-vs-searchbar{padding-left:12px}#jf-visual-search-panel .jf-vs-submit{width:42px;padding:0;font-size:0}#jf-visual-search-panel .jf-vs-submit:first-letter{font-size:17px}#jf-visual-search-panel .jf-vs-hints{width:100%;margin-left:0}#jf-visual-search-panel .jf-vs-options{align-items:flex-start}#jf-visual-search-panel .jf-vs-options label{width:100%}#jf-visual-search-panel select{max-width:none;width:100%}#jf-visual-search-panel .jf-vs-results{grid-template-columns:repeat(2,minmax(0,1fr));gap:10px}#jf-visual-search-panel .jf-vs-card{border-radius:11px}#jf-visual-search-panel .jf-vs-card-body{padding:8px}#jf-visual-search-panel .jf-vs-card-title{font-size:12px}#jf-visual-search-panel .jf-vs-card-actions button{font-size:10px;padding:6px 3px}#jf-visual-search-panel .jf-vs-toolbar-left,#jf-visual-search-panel .jf-vs-toolbar-right{width:100%}#jf-visual-search-panel .jf-vs-toolbar-right button{flex:1}}@media(prefers-reduced-motion:reduce){#jf-visual-search-panel,#jf-visual-search-panel .jf-vs-card,#jf-visual-search-launcher{animation:none;transition:none}}'
+            '@keyframes jf-vs-in{from{opacity:0;transform:translateY(8px)}to{opacity:1;transform:none}}@keyframes jf-vs-spin{to{transform:rotate(360deg)}}@media(max-width:600px){#jf-visual-search-launcher{right:14px;bottom:14px;right:max(14px,env(safe-area-inset-right));bottom:max(14px,env(safe-area-inset-bottom));width:48px;height:48px;min-height:48px;padding:0;justify-content:center;border-radius:50%}#jf-visual-search-launcher .jf-vs-launcher-label{display:none}#jf-visual-search-panel .jf-vs-shell{padding:16px 12px calc(32px + env(safe-area-inset-bottom))}#jf-visual-search-panel .jf-vs-header{margin-bottom:14px}#jf-visual-search-panel .jf-vs-subtitle{font-size:12px}#jf-visual-search-panel .jf-vs-searchbar{padding-left:12px}#jf-visual-search-panel .jf-vs-submit{width:42px;padding:0;font-size:0}#jf-visual-search-panel .jf-vs-submit:first-letter{font-size:17px}#jf-visual-search-panel .jf-vs-options{align-items:flex-start}#jf-visual-search-panel .jf-vs-options label{width:100%}#jf-visual-search-panel select{max-width:none;width:100%}#jf-visual-search-panel .jf-vs-results{grid-template-columns:repeat(2,minmax(0,1fr));gap:10px}#jf-visual-search-panel .jf-vs-card{border-radius:11px}#jf-visual-search-panel .jf-vs-card-body{padding:8px}#jf-visual-search-panel .jf-vs-card-title{font-size:12px}#jf-visual-search-panel .jf-vs-card-actions button{font-size:10px;padding:6px 3px}#jf-visual-search-panel .jf-vs-toolbar-left,#jf-visual-search-panel .jf-vs-toolbar-right{width:100%}#jf-visual-search-panel .jf-vs-toolbar-right button{flex:1}}@media(prefers-reduced-motion:reduce){#jf-visual-search-panel,#jf-visual-search-panel .jf-vs-card,#jf-visual-search-launcher{animation:none;transition:none}}'
         ].join('');
         (document.head || document.documentElement).appendChild(style);
     }
 
     function isPlaybackRoute() {
-        // Stable Jellyfin uses a hash route while the experimental router uses
-        // pathname routes. Inspect both so the panel is not restored while the
-        // player is active just because the other route representation is stale.
-        var route = (String(window.location.hash || '') + ' ' + String(window.location.pathname || '')).toLowerCase();
-        return /(?:^|[\/#!])video(?:[\/?#.]|$)/.test(route);
+        var routes = [window.location.hash || '', window.location.pathname || ''];
+        return routes.some(function (route) {
+            return /(?:^|[\/#!])(?:video|videoosd|videoplayer)(?:[\/?#.]|$)/i.test(String(route));
+        });
     }
 
-    function stopPlaybackRouteWatch() {
-        if (playbackWatchTimer) {
-            window.clearInterval(playbackWatchTimer);
-            playbackWatchTimer = 0;
-        }
+    function isPlayerVisible() {
+        if (isPlaybackRoute()) return true;
+        // The HTML player can open before the router changes, and a paused
+        // player must keep the launcher hidden too. Ignore cached hidden views.
+        return Array.prototype.some.call(document.querySelectorAll('.videoPlayerContainer, #videoOsdPage, .htmlvideoplayer'), function (element) {
+            if (element.closest('.hide, [hidden], [aria-hidden="true"]')) return false;
+            var style = window.getComputedStyle(element);
+            return style.display !== 'none' && style.visibility !== 'hidden' && element.getClientRects().length > 0;
+        });
     }
 
     function restorePanelAfterPlayback() {
-        if (!suspendedPanel) return;
+        if (!suspendedPanel || isPlayerVisible()) return;
         var panel = suspendedPanel;
         suspendedPanel = null;
-        stopPlaybackRouteWatch();
+        playbackRouteSeen = false;
+        playbackIdleSince = 0;
         panel.style.display = '';
         panel.removeAttribute('aria-hidden');
         var launcher = document.getElementById(launcherId);
-        if (launcher) launcher.style.display = '';
+        if (launcher) launcher.setAttribute('aria-expanded', 'true');
     }
 
     function checkPlaybackRouteReturn() {
-        if (!suspendedPanel) return;
-        if (isPlaybackRoute()) {
+        var active = isPlayerVisible();
+        var launcher = document.getElementById(launcherId);
+        if (launcher) launcher.style.display = active || playbackStarting || suspendedPanel ? 'none' : '';
+        if (active) {
+            if (!suspendedPanel) suspendPanelForPlayback();
             playbackRouteSeen = true;
+            playbackIdleSince = 0;
             return;
         }
-        // Do not restore merely because a playback request failed before the
-        // player route was entered. Once /video was seen, leaving it means the
-        // user has returned from playback and the old search panel is safe to show.
-        if (playbackRouteSeen || Date.now() - playbackSuspendStartedAt > 8000) restorePanelAfterPlayback();
+        // A timeout alone never means that playback ended. Only restore after
+        // an observed player has closed and the next non-player view is stable.
+        if (suspendedPanel && playbackRouteSeen && !playbackStarting) {
+            if (!playbackIdleSince) playbackIdleSince = Date.now();
+            if (Date.now() - playbackIdleSince >= 500) restorePanelAfterPlayback();
+        }
     }
 
     function suspendPanelForPlayback() {
         var panel = document.getElementById(panelId);
-        if (!panel) return;
-        suspendedPanel = panel;
-        playbackRouteSeen = false;
-        playbackSuspendStartedAt = Date.now();
-        panel.style.display = 'none';
-        panel.setAttribute('aria-hidden', 'true');
-        var launcher = document.getElementById(launcherId);
-        if (launcher) {
-            launcher.style.display = 'none';
-            launcher.setAttribute('aria-expanded', 'false');
+        if (panel && !suspendedPanel) {
+            suspendedPanel = panel;
+            playbackRouteSeen = false;
+            playbackIdleSince = 0;
+            panel.style.display = 'none';
+            panel.setAttribute('aria-hidden', 'true');
         }
-        stopPlaybackRouteWatch();
-        playbackWatchTimer = window.setInterval(checkPlaybackRouteReturn, 250);
-        checkPlaybackRouteReturn();
+        var launcher = document.getElementById(launcherId);
+        if (launcher) launcher.style.display = 'none';
     }
 
     function closePanel() {
-        stopPlaybackRouteWatch();
         suspendedPanel = null;
+        playbackRouteSeen = false;
         var panel = document.getElementById(panelId);
         if (panel) panel.remove();
         var launcher = document.getElementById(launcherId);
-        if (launcher) {
-            launcher.style.display = '';
-            launcher.setAttribute('aria-expanded', 'false');
-        }
+        if (launcher) launcher.setAttribute('aria-expanded', 'false');
+        checkPlaybackRouteReturn();
     }
 
     function formatTimestamp(milliseconds) {
@@ -203,168 +207,111 @@
         });
     }
 
-    function findNativePlaybackHost() {
-        var candidates = document.querySelectorAll('.itemsContainer');
-        for (var i = 0; i < candidates.length; i++) {
-            var candidate = candidates[i];
-            if (candidate.closest && candidate.closest('#' + panelId)) continue;
-            if (typeof candidate.enableMultiSelect === 'function') return candidate;
+    function playbackStatus(message, error) {
+        var panel = document.getElementById(panelId);
+        var status = panel && panel.querySelector('[data-jf-vs-status]');
+        if (status) {
+            status.textContent = message;
+            status.classList.toggle('is-error', !!error);
         }
-        return null;
     }
 
-    function createPlaybackBridge(ids, serverId, action, startPositionTicks) {
-        // Reuse a real Jellyfin items container whenever possible. Its click
-        // listener is already attached, so this path does not depend on the
-        // legacy custom-element upgrade timing.
-        var bridge = findNativePlaybackHost();
-        var ownsBridge = !bridge;
-        if (!bridge) {
-            try {
-                // Jellyfin 10.11 registers this legacy customized built-in;
-                // its click handler is wired to the module-scoped PlaybackManager.
-                bridge = document.createElement('div', 'emby-itemscontainer');
-            } catch (_) { bridge = null; }
+    async function sendSessionPlayback(ids, startPositionTicks, queue) {
+        // Jellyfin 10.11 keeps PlaybackManager module-scoped; a DOM click does
+        // not acknowledge playback. The official session API delivers a Play
+        // message to this client's native serverNotifications handler, which
+        // calls that same PlaybackManager with IDs and the requested position.
+        var deviceId = typeof ApiClient.deviceId === 'function' ? ApiClient.deviceId() : '';
+        var userId = typeof ApiClient.getCurrentUserId === 'function' ? ApiClient.getCurrentUserId() : '';
+        if (!deviceId || !userId) throw new Error('无法确认当前设备与登录用户，请重新登录 Jellyfin。');
+        if (typeof ApiClient.isWebSocketOpen !== 'function' || !ApiClient.isWebSocketOpen()) {
+            throw new Error('Jellyfin 实时连接未就绪，请等待连接恢复后重试播放。');
         }
-        if (!bridge || typeof bridge.enableMultiSelect !== 'function') {
-            try {
-                var modernBridge = document.createElement('div', { is: 'emby-itemscontainer' });
-                if (modernBridge && typeof modernBridge.enableMultiSelect === 'function') {
-                    bridge = modernBridge;
-                    ownsBridge = true;
-                }
-            } catch (_) { }
-        }
-        if (!bridge || typeof bridge.enableMultiSelect !== 'function') return null;
-        var hadOwnFetchData = Object.prototype.hasOwnProperty.call(bridge, 'fetchData');
-        var originalFetchData = bridge.fetchData;
-        if (!ownsBridge) {
-            // Force playAllFromHere to use the temporary card IDs instead of
-            // replacing them with the underlying page's fetchData result.
-            try { bridge.fetchData = null; } catch (_) { return null; }
-        } else {
-            bridge.className = 'itemsContainer jf-vs-playback-bridge';
-            bridge.style.display = 'none';
-        }
-        bridge.__jfVisualSearchPlayback = { ownsBridge: ownsBridge, cards: [], hadOwnFetchData: hadOwnFetchData, originalFetchData: originalFetchData };
-        ids.forEach(function (id, index) {
-            var card = document.createElement('div');
-            // playAllFromHere groups cards by their first class name.
-            card.className = 'jf-vs-playback-action itemAction';
-            card.style.display = 'none';
-            card.setAttribute('data-action', action);
-            card.setAttribute('data-id', id);
-            card.setAttribute('data-serverid', serverId);
-            card.setAttribute('data-type', 'Video');
-            card.setAttribute('data-mediatype', 'Video');
-            card.setAttribute('data-isfolder', 'false');
-            if (index === 0 && startPositionTicks > 0) card.setAttribute('data-positionticks', String(startPositionTicks));
-            bridge.appendChild(card);
-            bridge.__jfVisualSearchPlayback.cards.push(card);
+        var sessions = await ApiClient.getJSON(ApiClient.getUrl('Sessions', { DeviceId: deviceId }));
+        var normalizeId = function (value) { return String(value || '').replace(/-/g, '').toLowerCase(); };
+        var own = (Array.isArray(sessions) ? sessions : []).filter(function (session) {
+            return prop(session, 'DeviceId') === deviceId
+                && normalizeId(prop(session, 'UserId')) === normalizeId(userId)
+                && prop(session, 'Id');
         });
-        if (ownsBridge) document.body.appendChild(bridge);
-        return bridge;
+        if (own.length !== 1) throw new Error('无法唯一确认当前浏览器会话，请刷新 Jellyfin 后重试。');
+        var parameters = {
+            ItemIds: ids.join(','),
+            PlayCommand: queue ? 'PlayLast' : 'PlayNow',
+            StartIndex: 0
+        };
+        if (!queue) parameters.StartPositionTicks = startPositionTicks;
+        await ApiClient.ajax({
+            type: 'POST',
+            url: ApiClient.getUrl('Sessions/' + encodeURIComponent(prop(own[0], 'Id')) + '/Playing', parameters)
+        });
     }
 
-    function cleanupPlaybackBridge(bridge) {
-        if (!bridge) return;
-        var state = bridge.__jfVisualSearchPlayback;
-        if (!state) return;
-        (state.cards || []).forEach(function (card) { if (card.parentNode === bridge) bridge.removeChild(card); });
-        if (state.ownsBridge) {
-            if (bridge.parentNode) bridge.parentNode.removeChild(bridge);
-        } else if (state.hadOwnFetchData) {
-            bridge.fetchData = state.originalFetchData;
-        } else {
-            try { delete bridge.fetchData; } catch (_) { bridge.fetchData = state.originalFetchData; }
-        }
-        delete bridge.__jfVisualSearchPlayback;
-    }
-
-    function dispatchPlaybackBridge(ids, serverId, startItem, queue) {
-        if (!ids.length || !serverId) return false;
-        // Use Jellyfin's ID-based "play all from here" path even for one
-        // item. The regular "play" shortcut first runs playbackManager.canPlay
-        // against the card's lightweight data attributes; a visual-search
-        // result is not a complete Jellyfin DTO, so that guard can silently
-        // reject playback (only a console.warn, no request). The all-from-here
-        // shortcut collects the IDs and calls playbackManager.play directly,
-        // which is the same path Jellyfin uses for a real item container.
-        var action = queue ? 'queueallfromhere' : 'playallfromhere';
-        var startPositionTicks = !queue && startItem && prop(startItem, 'BestFrame')
-            ? Math.max(0, Number(prop(prop(startItem, 'BestFrame'), 'TimestampMs') || 0) * 10000)
-            : 0;
-        var bridge = createPlaybackBridge(ids, serverId, action, startPositionTicks);
-        if (!bridge || !bridge.firstElementChild) return false;
-        // A reused native container already has its own result cards before
-        // the bridge cards are appended. Never use firstElementChild here:
-        // that would click an unrelated page item instead of the synthetic
-        // card carrying the visual-search IDs.
-        var bridgeState = bridge.__jfVisualSearchPlayback;
-        var firstCard = bridgeState && bridgeState.cards && bridgeState.cards[0];
-        if (!firstCard) return false;
-        // webcomponents.js upgrades legacy customized built-ins from a
-        // MutationObserver. Dispatch after the element has been attached so
-        // Jellyfin's itemShortcuts listener is already registered.
-        return new Promise(function (resolve) {
-            var trigger = function () {
-                try {
-                    var event;
-                    try {
-                        event = new MouseEvent('click', { bubbles: true, cancelable: true, view: window });
-                    } catch (_) {
-                        event = document.createEvent('MouseEvents');
-                        event.initMouseEvent('click', true, true, window, 1, 0, 0, 0, 0, false, false, false, false, 0, null);
-                    }
-                    // HTMLElement.click() follows the browser's normal click
-                    // activation path and is what Jellyfin's own cards use;
-                    // keep the event fallback for older WebViews.
-                    if (typeof firstCard.click === 'function') firstCard.click();
-                    else firstCard.dispatchEvent(event);
-                    // PlaybackManager copies the card attributes before its
-                    // asynchronous item lookup starts. Keep the bridge long
-                    // enough for that lookup to be scheduled, then detach it.
-                    window.setTimeout(function () { cleanupPlaybackBridge(bridge); }, 2000);
-                    resolve(true);
-                } catch (error) {
-                    cleanupPlaybackBridge(bridge);
-                    console.error('[Visual Search] playback bridge failed', error);
-                    resolve(false);
+    function waitForPlayerStart() {
+        return new Promise(function (resolve, reject) {
+            var startedAt = Date.now();
+            function check() {
+                if (isPlayerVisible() || playbackRouteSeen) { resolve(); return; }
+                if (Date.now() - startedAt >= 30000) {
+                    reject(new Error('Jellyfin 已接收播放请求，但 30 秒内播放器未启动。请检查浏览器播放限制或 Jellyfin 播放日志。'));
+                    return;
                 }
-            };
-            if (window.requestAnimationFrame) window.requestAnimationFrame(function () { window.setTimeout(trigger, 0); });
-            else window.setTimeout(trigger, 0);
+                window.setTimeout(check, 250);
+            }
+            check();
         });
     }
 
     async function playResults(results, startItem) {
+        if (playbackStarting) return;
         var ids = getPlaybackIds(results);
         var serverId = getPlaybackServerId();
         if (!ids.length || !serverId) {
-            console.error('[Visual Search] unable to start playback', { hasServerId: !!serverId, itemCount: ids.length });
+            playbackStatus('播放失败：缺少视频 ID 或 Jellyfin 服务器信息。', true);
             return;
         }
+        var startPositionTicks = startItem && prop(startItem, 'BestFrame')
+            ? Math.max(0, Number(prop(prop(startItem, 'BestFrame'), 'TimestampMs') || 0) * 10000) : 0;
+        playbackStarting = true;
+        playbackRouteSeen = false;
+        playbackStatus('正在请求 Jellyfin 播放…', false);
         suspendPanelForPlayback();
-        var manager = getPlaybackManager();
-        if (manager && ids.length && serverId) {
-            try { await manager.play({ ids: ids, serverId: serverId, autoplay: true, startPositionTicks: startItem && prop(startItem, 'BestFrame') ? Math.max(0, Number(prop(prop(startItem, 'BestFrame'), 'TimestampMs') || 0) * 10000) : 0 }); return; }
-            catch (error) { console.warn('[Visual Search] direct playback unavailable, using Jellyfin bridge', error); }
-        }
-        if (!await dispatchPlaybackBridge(ids, serverId, startItem, false)) {
+        try {
+            var manager = getPlaybackManager();
+            if (manager && typeof manager.play === 'function') {
+                await manager.play({ ids: ids, serverId: serverId, startPositionTicks: startPositionTicks });
+            } else {
+                await sendSessionPlayback(ids, startPositionTicks, false);
+            }
+            await waitForPlayerStart();
+            playbackStatus('播放已启动，返回后可继续查看搜索结果。', false);
+        } catch (error) {
+            console.error('[Visual Search] playback failed', error);
+            playbackStatus('播放失败：' + await errorMessage(error), true);
+            // Only a real rejection can restore before the player was entered.
+            // Never launch another path after an accepted command (double play).
             restorePanelAfterPlayback();
-            console.error('[Visual Search] unable to start playback', { hasServerId: !!serverId, itemCount: ids.length });
+        } finally {
+            playbackStarting = false;
+            checkPlaybackRouteReturn();
         }
     }
 
     async function queueResults(results) {
         var ids = getPlaybackIds(results);
-        var serverId = getPlaybackServerId();
-        var manager = getPlaybackManager();
-        if (manager && ids.length && serverId) {
-            try { await manager.queue({ ids: ids, serverId: serverId }); return; }
-            catch (error) { console.warn('[Visual Search] direct queue unavailable, using Jellyfin bridge', error); }
+        if (!ids.length) return;
+        try {
+            var manager = getPlaybackManager();
+            if (manager && typeof manager.queue === 'function') {
+                await manager.queue({ ids: ids, serverId: getPlaybackServerId() });
+            } else {
+                await sendSessionPlayback(ids, 0, true);
+            }
+            playbackStatus('已加入 Jellyfin 播放队列。', false);
+        } catch (error) {
+            console.error('[Visual Search] queue failed', error);
+            playbackStatus('加入队列失败：' + await errorMessage(error), true);
         }
-        if (!await dispatchPlaybackBridge(ids, serverId, null, true)) console.error('[Visual Search] unable to queue playback', { hasServerId: !!serverId, itemCount: ids.length });
     }
 
     function applyCustomCode(results, query, preset) {
@@ -445,11 +392,12 @@
     }
 
     function openPanel() {
+        if (isPlayerVisible() || playbackStarting) return;
         ensureStyle();
         var old = document.getElementById(panelId);
         if (old) { var oldInput = old.querySelector('[data-jf-vs-query]'); if (oldInput) oldInput.focus(); return; }
         var panel = document.createElement('div'); panel.id = panelId;
-        panel.innerHTML = '<div class="jf-vs-shell"><header class="jf-vs-header"><div><p class="jf-vs-kicker">Visual Search</p><h1>视频语义搜索</h1><p class="jf-vs-subtitle">按画面和标题寻找视频。结果按文件夹式网格展示，支持播放全部、加入播放队列和从命中时间点开始播放。</p></div><button class="jf-vs-close" type="button" data-jf-vs-close aria-label="关闭">×</button></header><div class="jf-vs-searchbar"><input type="search" data-jf-vs-query autocomplete="off" enterkeyhint="search" placeholder="描述画面中的人物、地点、颜色或动作"><button class="jf-vs-clear" type="button" data-jf-vs-clear aria-label="清空">×</button><button class="jf-vs-submit" type="button" data-jf-vs-search>⌕<span>搜索</span></button></div><div class="jf-vs-options"><label>搜索配置<select data-jf-vs-preset></select></label><label>结果排序<select data-jf-vs-sort><option value="score">综合相关度</option><option value="visual">画面分</option><option value="title">标题分</option><option value="time">命中时间</option></select></label><div class="jf-vs-hints"><button class="jf-vs-hint" type="button" data-jf-vs-hint="海边的户外场景">海边户外</button><button class="jf-vs-hint" type="button" data-jf-vs-hint="红色衣服">红色衣服</button><button class="jf-vs-hint" type="button" data-jf-vs-hint="家庭聚会">家庭聚会</button><button class="jf-vs-hint" type="button" data-jf-vs-hint="两个人在说话">两个人说话</button></div></div><div class="jf-vs-toolbar"><div class="jf-vs-toolbar-left"><span class="jf-vs-count" data-jf-vs-status>输入描述开始搜索</span><span class="jf-vs-count" data-jf-vs-scope></span></div><div class="jf-vs-toolbar-right"><button type="button" class="jf-vs-primary" data-jf-vs-play-all style="display:none">▶ 播放全部</button><button type="button" data-jf-vs-queue-all style="display:none">＋ 加入队列</button></div></div><main class="jf-vs-results" data-jf-vs-results><div class="jf-vs-empty"><div class="jf-vs-empty-icon" aria-hidden="true">✦</div><strong>从一个画面描述开始</strong><span>搜索结果会按照当前配置展示。</span></div></main><footer class="jf-vs-footer">Enter 搜索 · Ctrl/⌘ + Shift + K 打开 · Esc 关闭</footer></div>';
+        panel.innerHTML = '<div class="jf-vs-shell"><header class="jf-vs-header"><div><p class="jf-vs-kicker">Visual Search</p><h1>视频语义搜索</h1><p class="jf-vs-subtitle">按画面和标题寻找视频。结果按文件夹式网格展示，支持播放全部、加入播放队列和从命中时间点开始播放。</p></div><button class="jf-vs-close" type="button" data-jf-vs-close aria-label="关闭">×</button></header><div class="jf-vs-searchbar"><input type="search" data-jf-vs-query autocomplete="off" enterkeyhint="search" placeholder="描述画面中的人物、地点、颜色或动作"><button class="jf-vs-clear" type="button" data-jf-vs-clear aria-label="清空">×</button><button class="jf-vs-submit" type="button" data-jf-vs-search>⌕<span>搜索</span></button></div><div class="jf-vs-options"><label>搜索配置<select data-jf-vs-preset></select></label><label>结果排序<select data-jf-vs-sort><option value="score">综合相关度</option><option value="visual">画面分</option><option value="title">标题分</option><option value="time">命中时间</option></select></label></div><div class="jf-vs-toolbar"><div class="jf-vs-toolbar-left"><span class="jf-vs-count" data-jf-vs-status>输入描述开始搜索</span><span class="jf-vs-count" data-jf-vs-scope></span></div><div class="jf-vs-toolbar-right"><button type="button" class="jf-vs-primary" data-jf-vs-play-all style="display:none">▶ 播放全部</button><button type="button" data-jf-vs-queue-all style="display:none">＋ 加入队列</button></div></div><main class="jf-vs-results" data-jf-vs-results><div class="jf-vs-empty"><div class="jf-vs-empty-icon" aria-hidden="true">✦</div><strong>从一个画面描述开始</strong><span>搜索结果会按照当前配置展示。</span></div></main><footer class="jf-vs-footer">Enter 搜索 · Ctrl/⌘ + Shift + K 打开 · Esc 关闭</footer></div>';
         document.body.appendChild(panel);
         var input = panel.querySelector('[data-jf-vs-query]'), submit = panel.querySelector('[data-jf-vs-search]'), clear = panel.querySelector('[data-jf-vs-clear]'), presetSelect = panel.querySelector('[data-jf-vs-preset]'), sortSelect = panel.querySelector('[data-jf-vs-sort]'), status = panel.querySelector('[data-jf-vs-status]'), scope = panel.querySelector('[data-jf-vs-scope]'), resultsContainer = panel.querySelector('[data-jf-vs-results]'), playAllButton = panel.querySelector('[data-jf-vs-play-all]'), queueAllButton = panel.querySelector('[data-jf-vs-queue-all]');
         var libraryIds = currentLibraryIds(); if (libraryIds.length) scope.textContent = '当前媒体库';
@@ -459,15 +407,15 @@
         var rerender = function () { if (resultsContainer.__jfData) renderResults(resultsContainer, resultsContainer.__jfData, resultsContainer.__jfQuery, sortSelect.value); updateActions(); };
         var run = async function () { var value = String(input.value || '').trim(); if (!value) { input.focus(); return; } submit.disabled = true; status.classList.remove('is-error'); status.innerHTML = '<span class="jf-vs-spinner" aria-hidden="true"></span>正在理解并搜索…'; renderEmpty(resultsContainer, '正在搜索', '正在比较标题、Trickplay 画面和 Primary 封面。'); try { var data = await API.search(value, libraryIds, settings.resultLimit, presetSelect.value); resultsContainer.__jfData = data; resultsContainer.__jfQuery = value; var count = renderResults(resultsContainer, data, value, sortSelect.value); updateActions(); status.textContent = count ? '找到 ' + count + ' 个相近视频 · ' + (prop(data, 'PresetName') || '') : '没有匹配结果'; } catch (error) { status.classList.add('is-error'); status.textContent = '搜索失败：' + await errorMessage(error); renderEmpty(resultsContainer, '暂时无法完成搜索', '请检查 Embedding 服务和 Qdrant 连接后重试。'); updateActions(); } finally { updateInput(); } };
         input.addEventListener('input', updateInput); input.addEventListener('keydown', function (event) { if (event.key === 'Enter') { event.preventDefault(); run(); } }); submit.addEventListener('click', run); clear.addEventListener('click', function () { input.value = ''; updateInput(); input.focus(); }); presetSelect.addEventListener('change', function () { if (String(input.value || '').trim()) run(); }); sortSelect.addEventListener('change', rerender);
-        panel.querySelectorAll('[data-jf-vs-hint]').forEach(function (hint) { hint.addEventListener('click', function () { input.value = hint.getAttribute('data-jf-vs-hint') || ''; updateInput(); input.focus(); run(); }); }); panel.querySelectorAll('[data-jf-vs-close]').forEach(function (element) { element.addEventListener('click', closePanel); });
+        panel.querySelectorAll('[data-jf-vs-close]').forEach(function (element) { element.addEventListener('click', closePanel); });
         resultsContainer.addEventListener('click', function (event) { var play = event.target.closest ? event.target.closest('[data-jf-vs-play-item]') : null; var queue = event.target.closest ? event.target.closest('[data-jf-vs-queue-item]') : null; if (play) { event.preventDefault(); event.stopPropagation(); var item = (resultsContainer.__jfResults || []).filter(function (x) { return String(prop(x, 'ItemId')) === String(play.getAttribute('data-jf-vs-play-item')); })[0]; if (item) playResults([item], item); } if (queue) { event.preventDefault(); event.stopPropagation(); var queued = (resultsContainer.__jfResults || []).filter(function (x) { return String(prop(x, 'ItemId')) === String(queue.getAttribute('data-jf-vs-queue-item')); }); if (queued.length) queueResults(queued); } }); playAllButton.addEventListener('click', function () { playResults(resultsContainer.__jfResults || []); }); queueAllButton.addEventListener('click', function () { queueResults(resultsContainer.__jfResults || []); });
         updateInput(); if (window.requestAnimationFrame) window.requestAnimationFrame(function () { input.focus(); }); else window.setTimeout(function () { input.focus(); }, 0); loadSettings().then(function () { if (!presetSelect.options.length) (settings.presets || []).forEach(function (preset) { var option = document.createElement('option'); option.value = prop(preset, 'Id') || ''; option.textContent = prop(preset, 'Name') || option.value; presetSelect.appendChild(option); }); presetSelect.value = settings.defaultPresetId; updateActions(); });
     }
 
-    function ensureLauncher() { if (!document.body || document.getElementById(launcherId)) return; ensureStyle(); var button = document.createElement('button'); button.id = launcherId; button.type = 'button'; button.title = '语义搜索（Ctrl/⌘ + Shift + K）'; button.setAttribute('aria-label', '打开视频语义搜索'); button.setAttribute('aria-expanded', 'false'); button.innerHTML = '<span class="jf-vs-launcher-icon" aria-hidden="true">⌕</span><span class="jf-vs-launcher-label">语义搜索</span>'; button.addEventListener('click', function () { button.setAttribute('aria-expanded', 'true'); openPanel(); }); document.body.appendChild(button); }
-    document.addEventListener('keydown', function (event) { if ((event.ctrlKey || event.metaKey) && event.shiftKey && event.key.toLowerCase() === 'k') { event.preventDefault(); ensureLauncher(); var launcher = document.getElementById(launcherId); if (launcher) launcher.setAttribute('aria-expanded', 'true'); openPanel(); } else if (event.key === 'Escape' && document.getElementById(panelId)) closePanel(); });
+    function ensureLauncher() { if (!document.body) return; if (document.getElementById(launcherId)) { checkPlaybackRouteReturn(); return; } ensureStyle(); var button = document.createElement('button'); button.id = launcherId; button.type = 'button'; button.title = '语义搜索（Ctrl/⌘ + Shift + K）'; button.setAttribute('aria-label', '打开视频语义搜索'); button.setAttribute('aria-expanded', 'false'); button.innerHTML = '<span class="jf-vs-launcher-icon" aria-hidden="true">⌕</span><span class="jf-vs-launcher-label">语义搜索</span>'; button.addEventListener('click', function () { button.setAttribute('aria-expanded', 'true'); openPanel(); }); document.body.appendChild(button); checkPlaybackRouteReturn(); }
+    document.addEventListener('keydown', function (event) { if ((event.ctrlKey || event.metaKey) && event.shiftKey && event.key.toLowerCase() === 'k') { event.preventDefault(); ensureLauncher(); var launcher = document.getElementById(launcherId); if (launcher) launcher.setAttribute('aria-expanded', 'true'); openPanel(); } else if (event.key === 'Escape' && !suspendedPanel && document.getElementById(panelId)) closePanel(); });
     function scheduleEnsure() { if (observerTimer) return; observerTimer = window.setTimeout(function () { observerTimer = 0; ensureLauncher(); }, 180); }
     function attachObserver() { if (observerAttached || !window.MutationObserver) return; var root = document.body || document.documentElement; if (!root) return; observerAttached = true; new MutationObserver(scheduleEnsure).observe(root, { childList: true, subtree: true }); }
-    function initialize() { ensureLauncher(); attachObserver(); checkPlaybackRouteReturn(); }
+    function initialize() { ensureLauncher(); attachObserver(); if (!playbackWatchTimer) playbackWatchTimer = window.setInterval(checkPlaybackRouteReturn, 250); checkPlaybackRouteReturn(); }
     document.addEventListener('DOMContentLoaded', initialize, false); document.addEventListener('readystatechange', initialize, false); window.addEventListener('load', initialize, false); window.addEventListener('pageshow', initialize, false); window.addEventListener('hashchange', checkPlaybackRouteReturn, false); window.addEventListener('popstate', checkPlaybackRouteReturn, false); if (document.addEventListener) { document.addEventListener('visibilitychange', scheduleEnsure, false); document.addEventListener('viewshow', checkPlaybackRouteReturn, false); } initialize(); [0, 250, 800, 1800].forEach(function (delay) { window.setTimeout(initialize, delay); });
 })();
